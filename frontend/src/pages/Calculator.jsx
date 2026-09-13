@@ -5,7 +5,7 @@ import { Section, Card, Btn, Disclaimer, Metric, Pill, ScoreGauge, SourceTag } f
 import { Field, TextInput, NumberInput, Select, SliderInput, Segmented } from "@/components/Form";
 import { AreaChartCard, BarChartCard, LineChartCard, ComposedCashflowCard, CostPieCard, TornadoChart } from "@/components/Charts";
 import { STATES, getStateByName } from "@/data/states";
-import { getDiscomsByState, DISCOMS } from "@/data/discoms";
+import { getDiscomsByState, getDiscomByName, DISCOMS } from "@/data/discoms";
 import { BUSINESS_TYPES } from "@/data/industries";
 import { DEMO_CUSTOMER } from "@/data/content";
 import { DEFAULTS, rateForCapacity } from "@/data/config";
@@ -50,6 +50,7 @@ export default function Calculator() {
   const stateObj = getStateByName(f.state);
   const irradiation = stateObj?.irradiation || 5.2;
   const stateDiscoms = f.state ? getDiscomsByState(f.state) : [];
+  const selectedDiscom = f.discom ? getDiscomByName(f.discom) : null;
 
   // Derived electricity figures
   const monthlyUnits = f.billMethod === "units"
@@ -157,9 +158,10 @@ export default function Calculator() {
                       <Field label="State / UT *"><Select value={f.state} onChange={(e) => { const st = getStateByName(e.target.value); upd({ state: e.target.value, stateCode: st?.code || "", discom: "" }); }} options={STATES.map((s) => s.name)} placeholder="Select state" data-testid="calc-state" /></Field>
                       <Field label="City *"><TextInput value={f.city} onChange={(e) => upd({ city: e.target.value })} placeholder="e.g. Faridabad" data-testid="calc-city" /></Field>
                       <Field label="PIN code (optional)"><TextInput value={f.pincode} onChange={(e) => upd({ pincode: e.target.value })} placeholder="121001" /></Field>
-                      <Field label="DISCOM" className="sm:col-span-2" hint={stateObj ? `Irradiation at ${f.state}: ${irradiation} kWh/m²/day` : ""}>
-                        <Select value={f.discom} onChange={(e) => upd({ discom: e.target.value })} options={(stateDiscoms.length ? stateDiscoms : DISCOMS).map((d) => d.name)} placeholder="Select DISCOM" data-testid="calc-discom" />
+                      <Field label="DISCOM" className="sm:col-span-2" hint={selectedDiscom ? `Tariff auto-filled: ₹${selectedDiscom.ciTariff}/kWh (HT energy ₹${selectedDiscom.energyChargeHT}, demand ₹${selectedDiscom.demandCharge}/kVA) · ${selectedDiscom.source}` : (stateObj ? `Irradiation at ${f.state}: ${irradiation} kWh/m²/day · Pick your DISCOM to auto-fill the correct tariff` : "")}>
+                        <Select value={f.discom} onChange={(e) => { const d = getDiscomByName(e.target.value); upd({ discom: e.target.value, ...(d ? { tariff: d.ciTariff, demandCharges: String(d.demandCharge) } : {}) }); }} options={(stateDiscoms.length ? stateDiscoms : DISCOMS).map((d) => d.name)} placeholder="Select DISCOM" data-testid="calc-discom" />
                       </Field>
+                      {selectedDiscom && <div className="sm:col-span-2 -mt-1 flex items-center gap-2 text-xs text-emerald-400 bg-emerald-500/5 border border-emerald-500/15 rounded-lg px-3 py-2"><CheckCircle2 className="w-3.5 h-3.5" /> Using {selectedDiscom.name}'s FY25-26 tariff of <span className="num font-semibold">₹{selectedDiscom.ciTariff}/kWh</span> — you can still adjust it in the next steps.</div>}
                     </div>
                   </div>
                 )}
@@ -187,7 +189,7 @@ export default function Calculator() {
                       {f.billMethod === "bill"
                         ? <Field label="Average monthly bill (₹) *"><NumberInput prefix="₹" value={f.monthlyBill} onChange={(e) => upd({ monthlyBill: e.target.value })} placeholder="1000000" data-testid="calc-bill" /></Field>
                         : <Field label="Average monthly units (kWh) *"><NumberInput value={f.monthlyUnits} onChange={(e) => upd({ monthlyUnits: e.target.value })} suffix="kWh" placeholder="100000" data-testid="calc-units" /></Field>}
-                      <Field label="Average tariff (₹/kWh) *" hint={stateObj ? `${f.state} C&I range: ₹${stateObj.ciTariffLow}–${stateObj.ciTariffHigh}` : ""}><NumberInput prefix="₹" value={f.tariff} onChange={(e) => upd({ tariff: e.target.value })} suffix="/kWh" data-testid="calc-tariff" /></Field>
+                      <Field label="Average tariff (₹/kWh) *" hint={selectedDiscom ? `Auto-filled from ${f.discom} (₹${selectedDiscom.ciTariff}/kWh, FY25-26). Adjust if your actual rate differs.` : (stateObj ? `${f.state} C&I range: ₹${stateObj.ciTariffLow}–${stateObj.ciTariffHigh}` : "")}><NumberInput prefix="₹" value={f.tariff} onChange={(e) => upd({ tariff: e.target.value })} suffix="/kWh" data-testid="calc-tariff" /></Field>
                       <Field label="Fixed charges (₹/month)"><NumberInput prefix="₹" value={f.fixedCharges} onChange={(e) => upd({ fixedCharges: e.target.value })} /></Field>
                       <Field label="Demand charges (₹/month)"><NumberInput prefix="₹" value={f.demandCharges} onChange={(e) => upd({ demandCharges: e.target.value })} /></Field>
                     </div>
