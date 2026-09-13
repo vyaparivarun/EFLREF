@@ -49,6 +49,22 @@ export function calculateSolarGeneration({
 // daytime-consumable energy. Roof/land availability caps the size.
 // ~ 1 kWp needs ~90-100 sq ft rooftop (RCC) → use 100 sq ft/kW.
 // ---------------------------------------------------------------------------
+// Area <-> capacity conversion helpers
+export function areaForCapacity(capacityKw, { sqftPerKw = 100, acreCapacityKw = 250 } = {}) {
+  const kw = Math.max(0, capacityKw || 0);
+  return { sqft: Math.round(kw * sqftPerKw), acres: +(kw / acreCapacityKw).toFixed(2) };
+}
+
+export function capacityFromArea({ roofAreaSqft = 0, landAreaAcres = 0, sqftPerKw = 100, acreCapacityKw = 250 }) {
+  return Math.max(0, (roofAreaSqft / sqftPerKw) + (landAreaAcres * acreCapacityKw));
+}
+
+// Capacity (kW) needed to offset 100% of annual consumption via self-consumption
+export function fullBillCapacityKw({ annualUnits, specificYield, selfConsumption = 0.85 }) {
+  if (!specificYield || specificYield <= 0 || !annualUnits) return 0;
+  return annualUnits / (specificYield * selfConsumption);
+}
+
 export function recommendSystemSize({
   annualUnits,
   daytimePct = 0.65,

@@ -6,37 +6,37 @@ import { Field, TextInput, NumberInput, Select, SliderInput, Segmented } from "@
 import { AreaChartCard, BarChartCard, LineChartCard, ComposedCashflowCard, CostPieCard, TornadoChart } from "@/components/Charts";
 import { STATES, getStateByName } from "@/data/states";
 import { getDiscomsByState, getDiscomByName, DISCOMS } from "@/data/discoms";
-import { BUSINESS_TYPES } from "@/data/industries";
+import { BUSINESS_TYPES, getIndustry } from "@/data/industries";
 import { DEMO_CUSTOMER } from "@/data/content";
 import { DEFAULTS, rateForCapacity } from "@/data/config";
 import { evaluateEligibility } from "@/data/incentives";
 import {
-  runProjectModel, runSensitivity, runTornado, recommendSystemSize, calculateSuitabilityScore,
+  runProjectModel, runSensitivity, runTornado, calculateSuitabilityScore,
+  areaForCapacity, capacityFromArea, fullBillCapacityKw,
 } from "@/lib/engine";
 import { createLead } from "@/lib/api";
 import { inr, inrCompact, kw, kwh, num, pct, yrs } from "@/lib/format";
 import {
-  MapPin, Building2, Receipt, Sun, Cpu, Wallet, ArrowRight, ArrowLeft, Sparkles,
-  TrendingUp, Leaf, Award, IndianRupee, CheckCircle2, Printer, Gauge, BarChart3, Zap,
+  MapPin, Receipt, Sun, Wallet, ArrowRight, ArrowLeft, Sparkles,
+  TrendingUp, Leaf, Award, IndianRupee, CheckCircle2, Printer, Gauge, BarChart3,
+  Zap, Ruler, Building2, MoveRight, HelpCircle,
 } from "lucide-react";
 
 const STEPS = [
   { id: 1, label: "Location", icon: MapPin },
-  { id: 2, label: "Business", icon: Building2 },
-  { id: 3, label: "Electricity Bill", icon: Receipt },
-  { id: 4, label: "Solar Site", icon: Sun },
-  { id: 5, label: "System", icon: Cpu },
-  { id: 6, label: "Project Cost", icon: Wallet },
+  { id: 2, label: "Business & Bill", icon: Receipt },
+  { id: 3, label: "Solar Area", icon: Ruler },
+  { id: 4, label: "Financing", icon: Wallet },
 ];
 
+const SHADE_LOSS = { Low: 0.02, Medium: 0.06, High: 0.12 };
+
 const initialState = {
-  state: "", stateCode: "", city: "", pincode: "", discom: "",
-  businessType: "", operatingDays: 26, operatingHours: 12, daytimePct: 65,
-  billMethod: "bill", monthlyBill: "", monthlyUnits: "", tariff: 8,
-  fixedCharges: "", demandCharges: "", otherCharges: "",
-  installationType: "Rooftop", roofAreaSqft: "", landAreaAcres: "", roofType: "RCC", shading: "Low",
-  panelTech: "TOPCon", inverterType: "String", systemType: "Grid-connected", autoSize: true, capacityKw: "",
-  ratePerWatt: "", tariffEscalation: 5, financingPct: 80, interestRate: DEFAULTS.interestRate, tenureYears: DEFAULTS.tenureYears,
+  state: "", city: "", discom: "",
+  businessType: "", billMethod: "bill", monthlyBill: "", monthlyUnits: "", tariff: 8,
+  installationType: "Rooftop", roofAreaSqft: "", landAreaAcres: "", shading: "Low",
+  autoSize: true, capacityKw: "", ratePerWatt: "",
+  tariffEscalation: 5, financingPct: 80, interestRate: DEFAULTS.interestRate, tenureYears: DEFAULTS.tenureYears,
 };
 
 export default function Calculator() {
@@ -44,6 +44,7 @@ export default function Calculator() {
   const [f, setF] = useState(initialState);
   const [showResults, setShowResults] = useState(false);
   const [stepError, setStepError] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const upd = (patch) => setF((s) => ({ ...s, ...patch }));
   const reportRef = useRef(null);
 
@@ -52,7 +53,7 @@ export default function Calculator() {
   const stateDiscoms = f.state ? getDiscomsByState(f.state) : [];
   const selectedDiscom = f.discom ? getDiscomByName(f.discom) : null;
 
-  // Derived electricity figures
+  // ---------- Electricity ----------
   const monthlyUnits = f.billMethod === "units"
     ? Number(f.monthlyUnits) || 0
     : (Number(f.monthlyBill) || 0) / (Number(f.tariff) || 8);
@@ -62,52 +63,62 @@ export default function Calculator() {
   const annualUnits = monthlyUnits * 12;
   const effectiveTariff = Number(f.tariff) || (monthlyUnits > 0 ? monthlyBill / monthlyUnits : 8);
 
-  // Recommended size
-  const rec = useMemo(() => recommendSystemSize({
-    annualUnits, daytimePct: f.daytimePct / 100,
-    specificYield: irradiation * 365 * DEFAULTS.performanceRatio,
-    roofAreaSqft: Number(f.roofAreaSqft) || 0, landAreaAcres: Number(f.landAreaAcres) || 0,
-  }), [annualUnits, f.daytimePct, irradiation, f.roofAreaSqft, f.landAreaAcres]);
+  // ---------- Area-driven sizing ----------
+  const shadingLoss = SHADE_LOSS[f.shading] ?? 0.03;
+  const specificYield = irradiation * 365 * DEFAULTS.performanceRatio * (1 - shadingLoss) * DEFAULTS.availability;
+  const fullKw = fullBillCapacityKw({ annualUnits, specificYield, selfConsumption: DEFAULTS.selfConsumption });
+  const areaNeed = areaForCapacity(fullKw);
+  const areaCapKw = capacityFromArea({ roofAreaSqft: Number(f.roofAreaSqft) || 0, landAreaAcres: Number(f.landAreaAcres) || 0 });
+  const hasAreaInput = (Number(f.roofAreaSqft) || 0) > 0 || (Number(f.landAreaAcres) || 0) > 0;
 
-  const capacityKw = f.autoSize ? rec.recommendedKw : (Number(f.capacityKw) || rec.recommendedKw);
+  const fitKw = Math.max(0, Math.round(hasAreaInput ? Math.min(fullKw, areaCapKw) : fullKw));
+  const capacityKw = f.autoSize ? fitKw : (Number(f.capacityKw) || fitKw);
+  const coveragePct = fullKw > 0 ? Math.min((capacityKw / fullKw) * 100, 100) : 0;
+  const areaLimited = hasAreaInput && areaCapKw < fullKw;
+
   const ratePerWatt = Number(f.ratePerWatt) || rateForCapacity(capacityKw);
 
   const model = useMemo(() => {
     if (!capacityKw || !annualUnits) return null;
     return runProjectModel({
       capacityKw, irradiation, performanceRatio: DEFAULTS.performanceRatio, shading: f.shading,
-      ratePerWatt, annualUnits, effectiveTariff, daytimePct: f.daytimePct / 100,
+      ratePerWatt, annualUnits, effectiveTariff, daytimePct: 0.65,
       tariffEscalation: (Number(f.tariffEscalation) || 5) / 100, financingPct: (Number(f.financingPct) || 80) / 100,
       interestRate: Number(f.interestRate) || 11, tenureYears: Number(f.tenureYears) || 7,
     });
-  }, [capacityKw, irradiation, f.shading, ratePerWatt, annualUnits, effectiveTariff, f.daytimePct, f.tariffEscalation, f.financingPct, f.interestRate, f.tenureYears]);
+  }, [capacityKw, irradiation, f.shading, ratePerWatt, annualUnits, effectiveTariff, f.tariffEscalation, f.financingPct, f.interestRate, f.tenureYears]);
 
   const loadDemo = () => {
     upd({
-      state: DEMO_CUSTOMER.state, stateCode: DEMO_CUSTOMER.stateCode, city: DEMO_CUSTOMER.city, discom: DEMO_CUSTOMER.discom,
-      businessType: DEMO_CUSTOMER.businessType, operatingDays: DEMO_CUSTOMER.operatingDays, operatingHours: DEMO_CUSTOMER.operatingHours,
-      daytimePct: DEMO_CUSTOMER.daytimePct, billMethod: "bill", monthlyBill: String(DEMO_CUSTOMER.monthlyBill),
-      monthlyUnits: String(DEMO_CUSTOMER.monthlyUnits), tariff: DEMO_CUSTOMER.tariff, roofAreaSqft: String(DEMO_CUSTOMER.roofAreaSqft),
-      installationType: DEMO_CUSTOMER.installationType, roofType: DEMO_CUSTOMER.roofType, shading: DEMO_CUSTOMER.shading, panelTech: DEMO_CUSTOMER.panelTech,
+      state: DEMO_CUSTOMER.state, city: DEMO_CUSTOMER.city, discom: DEMO_CUSTOMER.discom,
+      businessType: DEMO_CUSTOMER.businessType, billMethod: "bill", monthlyBill: String(DEMO_CUSTOMER.monthlyBill),
+      monthlyUnits: String(DEMO_CUSTOMER.monthlyUnits), tariff: DEMO_CUSTOMER.tariff,
+      roofAreaSqft: String(DEMO_CUSTOMER.roofAreaSqft), installationType: DEMO_CUSTOMER.installationType, shading: DEMO_CUSTOMER.shading,
     });
     toast.success("Demo data loaded (illustrative)");
   };
 
+  const setAreaToNeeded = () => {
+    if (f.installationType === "Ground-mounted") upd({ landAreaAcres: String(Math.max(0.5, Math.round(areaNeed.acres * 10) / 10)) });
+    else upd({ roofAreaSqft: String(Math.max(1000, Math.round(areaNeed.sqft / 100) * 100)) });
+    toast.success("Set to area needed for ~100% coverage");
+  };
+
   const canProceed = () => {
     if (step === 1) return f.state && f.city;
-    if (step === 3) return (f.billMethod === "bill" ? f.monthlyBill : f.monthlyUnits) && f.tariff;
+    if (step === 2) return (f.billMethod === "bill" ? f.monthlyBill : f.monthlyUnits) && f.tariff;
     return true;
   };
 
   const next = () => {
-    const msg = step === 1 ? "Please select a State and enter a City to continue."
-      : step === 3 ? "Please enter your monthly bill/units and average tariff to continue."
+    const msg = step === 1 ? "Please select a State and enter a City."
+      : step === 2 ? "Please enter your monthly bill (or units) and average tariff."
       : "";
-    if (!canProceed()) { setStepError(msg || "Please complete the required fields."); toast.error(msg || "Please complete the required fields"); return; }
+    if (!canProceed()) { setStepError(msg); toast.error(msg); return; }
     setStepError("");
-    if (step < 6) setStep(step + 1);
+    if (step < 4) setStep(step + 1);
     else {
-      if (!model) { setStepError("Enter bill details to calculate."); toast.error("Enter bill details to calculate"); return; }
+      if (!model) { setStepError("Enter bill details to calculate."); return; }
       setShowResults(true);
       setTimeout(() => reportRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     }
@@ -115,20 +126,19 @@ export default function Calculator() {
 
   return (
     <div>
-      {/* Header */}
       <div className="border-b border-white/10 bg-[#0D1B2A] hero-radial">
         <Section className="py-8 lg:py-10">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <div className="inline-flex items-center gap-2 text-[11px] font-mono uppercase tracking-[0.18em] text-amber-500 mb-2"><span className="w-6 h-px bg-amber-500/60" />Solar Savings Calculator</div>
-              <h1 className="font-head text-2xl lg:text-3xl font-extrabold text-slate-50">Your Solar Opportunity, end to end</h1>
+              <h1 className="font-head text-2xl lg:text-3xl font-extrabold text-slate-50">See how much you can save every month</h1>
+              <p className="text-sm text-slate-500 mt-1">Just 4 quick steps — we fill in the technical details for you.</p>
             </div>
             <Btn variant="outline" onClick={loadDemo} data-testid="load-demo-btn"><Sparkles className="w-4 h-4" /> Load demo data</Btn>
           </div>
         </Section>
       </div>
 
-      {/* Wizard */}
       {!showResults && (
         <Section className="py-8">
           {/* Progress */}
@@ -148,112 +158,121 @@ export default function Calculator() {
 
           <div className="grid lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
-              <Card className="min-h-[420px]">
-                {/* STEP 1 */}
+              <Card className="min-h-[440px]">
+                {/* STEP 1 — LOCATION */}
                 {step === 1 && (
                   <div className="space-y-5">
                     <h2 className="font-head font-semibold text-xl text-slate-100">Where is your facility?</h2>
                     <div className="grid sm:grid-cols-2 gap-4">
-                      <Field label="Country"><TextInput value="India" disabled /></Field>
-                      <Field label="State / UT *"><Select value={f.state} onChange={(e) => { const st = getStateByName(e.target.value); upd({ state: e.target.value, stateCode: st?.code || "", discom: "" }); }} options={STATES.map((s) => s.name)} placeholder="Select state" data-testid="calc-state" /></Field>
+                      <Field label="State / UT *"><Select value={f.state} onChange={(e) => upd({ state: e.target.value, discom: "" })} options={STATES.map((s) => s.name)} placeholder="Select state" data-testid="calc-state" /></Field>
                       <Field label="City *"><TextInput value={f.city} onChange={(e) => upd({ city: e.target.value })} placeholder="e.g. Faridabad" data-testid="calc-city" /></Field>
-                      <Field label="PIN code (optional)"><TextInput value={f.pincode} onChange={(e) => upd({ pincode: e.target.value })} placeholder="121001" /></Field>
-                      <Field label="DISCOM" className="sm:col-span-2" hint={selectedDiscom ? `Tariff auto-filled: ₹${selectedDiscom.ciTariff}/kWh (HT energy ₹${selectedDiscom.energyChargeHT}, demand ₹${selectedDiscom.demandCharge}/kVA) · ${selectedDiscom.source}` : (stateObj ? `Irradiation at ${f.state}: ${irradiation} kWh/m²/day · Pick your DISCOM to auto-fill the correct tariff` : "")}>
-                        <Select value={f.discom} onChange={(e) => { const d = getDiscomByName(e.target.value); upd({ discom: e.target.value, ...(d ? { tariff: d.ciTariff, demandCharges: String(d.demandCharge) } : {}) }); }} options={(stateDiscoms.length ? stateDiscoms : DISCOMS).map((d) => d.name)} placeholder="Select DISCOM" data-testid="calc-discom" />
-                      </Field>
-                      {selectedDiscom && <div className="sm:col-span-2 -mt-1 flex items-center gap-2 text-xs text-emerald-400 bg-emerald-500/5 border border-emerald-500/15 rounded-lg px-3 py-2"><CheckCircle2 className="w-3.5 h-3.5" /> Using {selectedDiscom.name}'s FY25-26 tariff of <span className="num font-semibold">₹{selectedDiscom.ciTariff}/kWh</span> — you can still adjust it in the next steps.</div>}
                     </div>
+                    <Field label="Your electricity DISCOM" hint={stateObj ? `Irradiation at ${f.state}: ${irradiation} kWh/m²/day · picking your DISCOM auto-fills the correct tariff` : "Pick your state first"}>
+                      <Select value={f.discom} onChange={(e) => { const d = getDiscomByName(e.target.value); upd({ discom: e.target.value, ...(d ? { tariff: d.ciTariff } : {}) }); }} options={(stateDiscoms.length ? stateDiscoms : DISCOMS).map((d) => d.name)} placeholder="Select DISCOM" data-testid="calc-discom" />
+                    </Field>
+                    {selectedDiscom && (
+                      <div className="flex items-center gap-2 text-xs text-emerald-400 bg-emerald-500/5 border border-emerald-500/15 rounded-lg px-3 py-2.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> Using {selectedDiscom.name}'s FY25-26 tariff of <span className="num font-semibold">₹{selectedDiscom.ciTariff}/kWh</span> (HT energy ₹{selectedDiscom.energyChargeHT}, demand ₹{selectedDiscom.demandCharge}/kVA).
+                      </div>
+                    )}
                   </div>
                 )}
-                {/* STEP 2 */}
+
+                {/* STEP 2 — BUSINESS & BILL */}
                 {step === 2 && (
                   <div className="space-y-5">
-                    <h2 className="font-head font-semibold text-xl text-slate-100">Tell us about your business</h2>
-                    <Field label="Business type"><Select value={f.businessType} onChange={(e) => upd({ businessType: e.target.value })} options={BUSINESS_TYPES} placeholder="Select" data-testid="calc-business" /></Field>
-                    <div className="grid sm:grid-cols-2 gap-4">
-                      <SliderInput label="Operating days / week" value={Math.min(f.operatingDays / 4.33, 7)} onChange={(v) => upd({ operatingDays: Math.round(v * 4.33) })} min={1} max={7} step={1} format={(v) => `${Math.round(v)} days`} testId="calc-opdays" />
-                      <SliderInput label="Operating hours / day" value={f.operatingHours} onChange={(v) => upd({ operatingHours: v })} min={4} max={24} step={1} format={(v) => `${v} hrs`} testId="calc-ophours" />
-                    </div>
-                    <div>
-                      <SliderInput label="Daytime consumption share" value={f.daytimePct} onChange={(v) => upd({ daytimePct: v })} min={20} max={100} step={5} format={(v) => `${v}%`} testId="calc-daytime" />
-                      <div className="text-xs text-slate-500 mt-2">Night-time share: {100 - f.daytimePct}%. Higher daytime share improves solar self-consumption.</div>
-                    </div>
-                  </div>
-                )}
-                {/* STEP 3 */}
-                {step === 3 && (
-                  <div className="space-y-5">
                     <h2 className="font-head font-semibold text-xl text-slate-100">Your electricity bill</h2>
-                    <Segmented options={[{ value: "bill", label: "By monthly bill" }, { value: "units", label: "By monthly units" }]} value={f.billMethod} onChange={(v) => upd({ billMethod: v })} testId="calc-billmethod" />
+                    <Field label="Business type"><Select value={f.businessType} onChange={(e) => upd({ businessType: e.target.value })} options={BUSINESS_TYPES} placeholder="Select" data-testid="calc-business" /></Field>
+                    <Segmented options={[{ value: "bill", label: "I know my monthly bill (₹)" }, { value: "units", label: "I know my monthly units (kWh)" }]} value={f.billMethod} onChange={(v) => upd({ billMethod: v })} testId="calc-billmethod" />
                     <div className="grid sm:grid-cols-2 gap-4">
                       {f.billMethod === "bill"
-                        ? <Field label="Average monthly bill (₹) *"><NumberInput prefix="₹" value={f.monthlyBill} onChange={(e) => upd({ monthlyBill: e.target.value })} placeholder="1000000" data-testid="calc-bill" /></Field>
+                        ? <Field label="Average monthly bill (₹) *"><NumberInput prefix="₹" value={f.monthlyBill} onChange={(e) => upd({ monthlyBill: e.target.value })} placeholder="100000" data-testid="calc-bill" /></Field>
                         : <Field label="Average monthly units (kWh) *"><NumberInput value={f.monthlyUnits} onChange={(e) => upd({ monthlyUnits: e.target.value })} suffix="kWh" placeholder="100000" data-testid="calc-units" /></Field>}
-                      <Field label="Average tariff (₹/kWh) *" hint={selectedDiscom ? `Auto-filled from ${f.discom} (₹${selectedDiscom.ciTariff}/kWh, FY25-26). Adjust if your actual rate differs.` : (stateObj ? `${f.state} C&I range: ₹${stateObj.ciTariffLow}–${stateObj.ciTariffHigh}` : "")}><NumberInput prefix="₹" value={f.tariff} onChange={(e) => upd({ tariff: e.target.value })} suffix="/kWh" data-testid="calc-tariff" /></Field>
-                      <Field label="Fixed charges (₹/month)"><NumberInput prefix="₹" value={f.fixedCharges} onChange={(e) => upd({ fixedCharges: e.target.value })} /></Field>
-                      <Field label="Demand charges (₹/month)"><NumberInput prefix="₹" value={f.demandCharges} onChange={(e) => upd({ demandCharges: e.target.value })} /></Field>
+                      <Field label="Your tariff (₹/kWh) *" hint={selectedDiscom ? `Auto-filled from ${f.discom}. Adjust if yours differs.` : (stateObj ? `${f.state} C&I range ₹${stateObj.ciTariffLow}–${stateObj.ciTariffHigh}` : "")}>
+                        <NumberInput prefix="₹" value={f.tariff} onChange={(e) => upd({ tariff: e.target.value })} suffix="/kWh" data-testid="calc-tariff" />
+                      </Field>
                     </div>
-                    {monthlyUnits > 0 && <div className="p-3 rounded-lg bg-blue-500/5 border border-blue-500/15 text-xs text-slate-300">Estimated consumption: <span className="num text-blue-400 font-semibold">{num(monthlyUnits)} kWh/month</span> · Annual: <span className="num text-blue-400 font-semibold">{kwh(annualUnits)}</span></div>}
-                    <Disclaimer>Electricity bill OCR upload is planned — the architecture already captures consumer number, sanctioned load, tariff category, demand and charges for future auto-extraction.</Disclaimer>
+                    {monthlyUnits > 0 && (
+                      <div className="p-3.5 rounded-lg bg-blue-500/5 border border-blue-500/15 text-sm text-slate-300">
+                        You use ~<span className="num text-blue-400 font-semibold">{num(monthlyUnits)} kWh/month</span> and spend <span className="num text-blue-400 font-semibold">{inr(monthlyBill)}/month</span> ({inr(monthlyBill * 12)}/year).
+                      </div>
+                    )}
                   </div>
                 )}
-                {/* STEP 4 */}
-                {step === 4 && (
+
+                {/* STEP 3 — AREA */}
+                {step === 3 && (
                   <div className="space-y-5">
-                    <h2 className="font-head font-semibold text-xl text-slate-100">Your solar site</h2>
-                    <Field label="Installation type"><Segmented options={["Rooftop", "Ground-mounted", "Carport", "Mixed"]} value={f.installationType} onChange={(v) => upd({ installationType: v })} testId="calc-install" /></Field>
+                    <h2 className="font-head font-semibold text-xl text-slate-100">How much area do you have?</h2>
+
+                    {fullKw > 0 && (
+                      <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                        <div className="text-xs uppercase tracking-wider text-amber-500/80 font-mono mb-1">To cover 100% of your bill</div>
+                        <div className="num text-2xl font-bold text-amber-400">{num(areaNeed.sqft)} sq ft <span className="text-base text-slate-500 font-normal">(≈ {kw(fullKw)})</span></div>
+                        <div className="text-xs text-slate-500 mt-1">or about {areaNeed.acres} acres if ground-mounted. Then compare with the area you actually have below.</div>
+                      </div>
+                    )}
+
+                    <Field label="Installation type"><Segmented options={["Rooftop", "Ground-mounted", "Carport"]} value={f.installationType} onChange={(v) => upd({ installationType: v })} testId="calc-install" /></Field>
+
                     <div className="grid sm:grid-cols-2 gap-4">
-                      <Field label="Available rooftop area (sq ft)"><NumberInput value={f.roofAreaSqft} onChange={(e) => upd({ roofAreaSqft: e.target.value })} suffix="sqft" placeholder="80000" data-testid="calc-roof" /></Field>
-                      <Field label="Available land (acres)"><NumberInput value={f.landAreaAcres} onChange={(e) => upd({ landAreaAcres: e.target.value })} suffix="acres" /></Field>
-                      <Field label="Roof type"><Select value={f.roofType} onChange={(e) => upd({ roofType: e.target.value })} options={["RCC", "Metal", "PEB", "Sheet", "Other"]} /></Field>
+                      {f.installationType === "Ground-mounted"
+                        ? <Field label="Land available (acres)"><NumberInput value={f.landAreaAcres} onChange={(e) => upd({ landAreaAcres: e.target.value })} suffix="acres" placeholder="e.g. 3" data-testid="calc-land" /></Field>
+                        : <Field label="Roof area available (sq ft)"><NumberInput value={f.roofAreaSqft} onChange={(e) => upd({ roofAreaSqft: e.target.value })} suffix="sqft" placeholder="e.g. 80000" data-testid="calc-roof" /></Field>}
                       <Field label="Shading"><Segmented options={["Low", "Medium", "High"]} value={f.shading} onChange={(v) => upd({ shading: v })} testId="calc-shading" /></Field>
                     </div>
-                    {rec.recommendedKw > 0 && <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/15 text-xs text-slate-300">Based on your load and area, we suggest ~<span className="num text-amber-400 font-semibold">{kw(rec.recommendedKw)}</span>{rec.areaLimited && <span className="text-amber-400"> (area-limited from {kw(rec.unconstrainedKw)})</span>}</div>}
-                  </div>
-                )}
-                {/* STEP 5 */}
-                {step === 5 && (
-                  <div className="space-y-5">
-                    <h2 className="font-head font-semibold text-xl text-slate-100">Solar system configuration</h2>
-                    <div className="grid sm:grid-cols-2 gap-4">
-                      <Field label="Panel technology"><Select value={f.panelTech} onChange={(e) => upd({ panelTech: e.target.value })} options={["Mono PERC", "TOPCon", "HJT", "Other"]} /></Field>
-                      <Field label="Inverter type"><Select value={f.inverterType} onChange={(e) => upd({ inverterType: e.target.value })} options={["String", "Central", "Micro inverter"]} /></Field>
-                      <Field label="System type"><Select value={f.systemType} onChange={(e) => upd({ systemType: e.target.value })} options={["Grid-connected", "Hybrid", "Battery-backed"]} /></Field>
-                    </div>
-                    <Field label="Plant capacity">
-                      <div className="flex items-center gap-3">
-                        <Segmented options={[{ value: true, label: "Auto recommended" }, { value: false, label: "Custom" }]} value={f.autoSize} onChange={(v) => upd({ autoSize: v })} testId="calc-autosize" />
+                    {fullKw > 0 && <Btn variant="outline" size="sm" onClick={setAreaToNeeded} data-testid="use-full-area-btn"><Ruler className="w-4 h-4" /> I have enough area — cover my full bill</Btn>}
+
+                    {hasAreaInput && fullKw > 0 && (
+                      <div className={`p-4 rounded-lg border ${areaLimited ? "bg-blue-500/5 border-blue-500/20" : "bg-emerald-500/5 border-emerald-500/20"}`}>
+                        <div className="text-xs uppercase tracking-wider font-mono mb-1.5" style={{ color: areaLimited ? "#60A5FA" : "#34D399" }}>What your area gives you</div>
+                        <div className="text-sm text-slate-300 leading-relaxed">
+                          Your area fits about <span className="num font-bold text-slate-100">{kw(fitKw)}</span>, covering ~<span className="num font-bold" style={{ color: areaLimited ? "#60A5FA" : "#34D399" }}>{coveragePct.toFixed(0)}%</span> of your bill.
+                          {areaLimited && <> The remaining ~{(100 - coveragePct).toFixed(0)}% stays on grid. To cover 100%, you'd need ~{num(areaNeed.sqft)} sq ft.</>}
+                        </div>
                       </div>
-                    </Field>
-                    {f.autoSize
-                      ? <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/15"><div className="text-xs text-slate-500 uppercase tracking-wider font-mono mb-1">Recommended capacity</div><div className="num text-2xl font-bold text-amber-400">{kw(rec.recommendedKw)}</div><div className="text-xs text-slate-500 mt-1">Sized to offset ~90% of daytime-available load, capped by your area.</div></div>
-                      : <Field label="Custom capacity (kW)"><NumberInput value={f.capacityKw} onChange={(e) => upd({ capacityKw: e.target.value })} suffix="kW" placeholder={String(rec.recommendedKw)} data-testid="calc-capacity" /></Field>}
+                    )}
+
+                    {/* Offsite / credits */}
+                    <div className="flex gap-3 p-4 rounded-lg bg-white/[0.03] border border-white/10">
+                      <HelpCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                      <div className="text-xs text-slate-400 leading-relaxed">
+                        <span className="text-slate-200 font-semibold">Don't have enough roof?</span> You can install solar at a <span className="text-slate-200">different location</span> and still cut this factory's bill via <span className="text-slate-200">Open Access / Group Captive</span> — the plant feeds power to the grid and your connection gets credited (subject to your state's wheeling, banking & open-access charges). Net metering offsets only the <span className="text-slate-200">same connection</span>; for a different factory connection, use Open Access or Group Captive. See <Link to="/project-models" className="text-amber-400 underline underline-offset-2">Project Models</Link>.
+                      </div>
+                    </div>
                   </div>
                 )}
-                {/* STEP 6 */}
-                {step === 6 && (
+
+                {/* STEP 4 — FINANCING */}
+                {step === 4 && (
                   <div className="space-y-5">
-                    <h2 className="font-head font-semibold text-xl text-slate-100">Project cost & financing</h2>
-                    <div className="grid sm:grid-cols-2 gap-4">
-                      <Field label="EPC cost (₹/W)" hint={`Benchmark for ${kw(capacityKw)}: ₹${rateForCapacity(capacityKw)}/W`}><NumberInput prefix="₹" value={f.ratePerWatt} onChange={(e) => upd({ ratePerWatt: e.target.value })} suffix="/W" placeholder={String(rateForCapacity(capacityKw))} data-testid="calc-rate" /></Field>
-                      <Field label="Capacity (kW)"><NumberInput value={capacityKw} disabled /></Field>
+                    <h2 className="font-head font-semibold text-xl text-slate-100">Financing (EFL defaults applied)</h2>
+                    <div className="grid sm:grid-cols-3 gap-4">
+                      <div className="p-4 rounded-lg bg-white/[0.03] border border-white/10"><div className="text-[10px] uppercase tracking-wider text-slate-500 font-mono">Financing share</div><div className="num text-xl font-bold text-amber-400">{f.financingPct}%</div></div>
+                      <div className="p-4 rounded-lg bg-white/[0.03] border border-white/10"><div className="text-[10px] uppercase tracking-wider text-slate-500 font-mono">Interest rate</div><div className="num text-xl font-bold text-amber-400">{f.interestRate}%</div></div>
+                      <div className="p-4 rounded-lg bg-white/[0.03] border border-white/10"><div className="text-[10px] uppercase tracking-wider text-slate-500 font-mono">Tenure</div><div className="num text-xl font-bold text-amber-400">{f.tenureYears} yrs</div></div>
                     </div>
-                    <div className="p-4 rounded-lg bg-emerald-500/5 border border-emerald-500/15 flex items-center justify-between">
-                      <div><div className="text-xs text-slate-500 uppercase tracking-wider font-mono">Estimated project cost</div><div className="num text-2xl font-bold text-emerald-400">{inrCompact(capacityKw * 1000 * ratePerWatt)}</div></div>
-                      <Wallet className="w-8 h-8 text-emerald-400/50" />
-                    </div>
-                    <div className="grid sm:grid-cols-3 gap-4 pt-2">
-                      <SliderInput label="Financing share" value={f.financingPct} onChange={(v) => upd({ financingPct: v })} min={50} max={100} step={5} format={(v) => `${v}%`} testId="calc-finpct" />
-                      <SliderInput label="Interest rate" value={f.interestRate} onChange={(v) => upd({ interestRate: v })} min={8} max={16} step={0.25} format={(v) => `${v}%`} testId="calc-rate-slider" />
-                      <SliderInput label="Tenure" value={f.tenureYears} onChange={(v) => upd({ tenureYears: v })} min={3} max={10} step={1} format={(v) => `${v}y`} testId="calc-tenure" />
-                    </div>
-                    <SliderInput label="Tariff escalation (annual)" value={f.tariffEscalation} onChange={(v) => upd({ tariffEscalation: v })} min={0} max={10} step={1} format={(v) => `${v}%`} testId="calc-escalation" />
+                    <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="text-xs text-amber-400 hover:text-amber-300 font-medium" data-testid="toggle-advanced">
+                      {showAdvanced ? "Hide advanced options" : "Adjust financing, cost & tariff escalation →"}
+                    </button>
+                    {showAdvanced && (
+                      <div className="grid sm:grid-cols-3 gap-5 pt-1">
+                        <SliderInput label="Financing share" value={f.financingPct} onChange={(v) => upd({ financingPct: v })} min={50} max={100} step={5} format={(v) => `${v}%`} testId="calc-finpct" />
+                        <SliderInput label="Interest rate" value={f.interestRate} onChange={(v) => upd({ interestRate: v })} min={8} max={16} step={0.25} format={(v) => `${v}%`} testId="calc-rate-slider" />
+                        <SliderInput label="Tenure" value={f.tenureYears} onChange={(v) => upd({ tenureYears: v })} min={3} max={10} step={1} format={(v) => `${v}y`} testId="calc-tenure" />
+                        <SliderInput label="Tariff escalation / yr" value={f.tariffEscalation} onChange={(v) => upd({ tariffEscalation: v })} min={0} max={10} step={1} format={(v) => `${v}%`} testId="calc-escalation" />
+                        <Field label="EPC cost (₹/W)"><NumberInput prefix="₹" value={f.ratePerWatt} onChange={(e) => upd({ ratePerWatt: e.target.value })} suffix="/W" placeholder={String(rateForCapacity(capacityKw))} data-testid="calc-rate" /></Field>
+                        <div className="flex items-end"><Segmented options={[{ value: true, label: "Auto size" }, { value: false, label: "Custom kW" }]} value={f.autoSize} onChange={(v) => upd({ autoSize: v })} testId="calc-autosize" /></div>
+                        {!f.autoSize && <Field label="Custom capacity (kW)"><NumberInput value={f.capacityKw} onChange={(e) => upd({ capacityKw: e.target.value })} suffix="kW" placeholder={String(fitKw)} data-testid="calc-capacity" /></Field>}
+                      </div>
+                    )}
+                    <Disclaimer>Financing figures are indicative and subject to EFL's credit assessment, applicable terms and approval.</Disclaimer>
                   </div>
                 )}
 
                 <div className="flex justify-between mt-8 pt-6 border-t border-white/10">
                   <Btn variant="ghost" onClick={() => setStep(Math.max(1, step - 1))} disabled={step === 1}><ArrowLeft className="w-4 h-4" /> Back</Btn>
-                  <Btn onClick={next} data-testid="calc-next-btn">{step === 6 ? "Calculate Opportunity" : "Continue"} <ArrowRight className="w-4 h-4" /></Btn>
+                  <Btn onClick={next} data-testid="calc-next-btn">{step === 4 ? "See My Monthly Saving" : "Continue"} <ArrowRight className="w-4 h-4" /></Btn>
                 </div>
                 {stepError && <div className="mt-3 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3.5 py-2.5" data-testid="calc-step-error">{stepError}</div>}
               </Card>
@@ -264,10 +283,10 @@ export default function Calculator() {
               <Card>
                 <div className="text-xs uppercase tracking-wider text-slate-500 font-mono mb-4">Live Estimate</div>
                 <div className="space-y-3">
-                  <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Recommended size</span><span className="num font-semibold text-amber-400">{capacityKw ? kw(capacityKw) : "—"}</span></div>
+                  <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Plant size</span><span className="num font-semibold text-amber-400">{capacityKw ? kw(capacityKw) : "—"}</span></div>
+                  <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Bill coverage</span><span className="num font-semibold text-emerald-400">{fullKw ? `${coveragePct.toFixed(0)}%` : "—"}</span></div>
                   <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Project cost</span><span className="num font-semibold text-slate-200">{capacityKw ? inrCompact(capacityKw * 1000 * ratePerWatt) : "—"}</span></div>
-                  <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Annual generation</span><span className="num font-semibold text-blue-400">{model ? kwh(model.generation.year1Generation) : "—"}</span></div>
-                  <div className="border-t border-white/10 pt-3 flex justify-between items-center"><span className="text-sm text-slate-300 font-medium">Est. annual savings</span><span className="num font-bold text-emerald-400 text-lg">{model ? inrCompact(model.metrics.annualSavingsY1) : "—"}</span></div>
+                  <div className="border-t border-white/10 pt-3 flex justify-between items-center"><span className="text-sm text-slate-300 font-medium">Monthly saving</span><span className="num font-bold text-emerald-400 text-lg">{model ? inr(model.metrics.netMonthlyBenefit) : "—"}</span></div>
                   <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Monthly EMI</span><span className="num font-semibold text-amber-400">{model ? inr(model.metrics.monthlyEMI) : "—"}</span></div>
                   <div className="flex justify-between items-center"><span className="text-sm text-slate-400">Payback</span><span className="num font-semibold text-slate-200">{model?.metrics.simplePayback ? yrs(model.metrics.simplePayback) : "—"}</span></div>
                 </div>
@@ -277,42 +296,38 @@ export default function Calculator() {
         </Section>
       )}
 
-      {/* Mobile sticky savings */}
       {!showResults && model && (
         <div className="lg:hidden fixed bottom-0 inset-x-0 z-40 glass border-t border-white/10 p-3 flex items-center justify-between no-print">
-          <div><div className="text-[10px] text-slate-500 font-mono uppercase">Est. Annual Savings</div><div className="num text-lg font-bold text-emerald-400">{inrCompact(model.metrics.annualSavingsY1)}</div></div>
-          <Btn onClick={next} className="!py-2">{step === 6 ? "Calculate" : "Next"} <ArrowRight className="w-4 h-4" /></Btn>
+          <div><div className="text-[10px] text-slate-500 font-mono uppercase">Est. Monthly Saving</div><div className="num text-lg font-bold text-emerald-400">{inr(model.metrics.netMonthlyBenefit)}</div></div>
+          <Btn onClick={next} className="!py-2">{step === 4 ? "Calculate" : "Next"} <ArrowRight className="w-4 h-4" /></Btn>
         </div>
       )}
 
-      {showResults && model && <Results f={f} model={model} capacityKw={capacityKw} irradiation={irradiation} ratePerWatt={ratePerWatt} annualUnits={annualUnits} effectiveTariff={effectiveTariff} monthlyBill={monthlyBill} rec={rec} reportRef={reportRef} onEdit={() => setShowResults(false)} />}
+      {showResults && model && <Results f={f} model={model} capacityKw={capacityKw} fullKw={fullKw} areaNeed={areaNeed} coveragePct={coveragePct} areaLimited={areaLimited} fitKw={fitKw} hasAreaInput={hasAreaInput} irradiation={irradiation} ratePerWatt={ratePerWatt} annualUnits={annualUnits} effectiveTariff={effectiveTariff} monthlyBill={monthlyBill} reportRef={reportRef} onEdit={() => setShowResults(false)} />}
     </div>
   );
 }
 
 // ============================ RESULTS ============================
-function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, effectiveTariff, monthlyBill, rec, reportRef, onEdit }) {
+function Results({ f, model, capacityKw, fullKw, areaNeed, coveragePct, areaLimited, fitKw, hasAreaInput, irradiation, ratePerWatt, annualUnits, effectiveTariff, monthlyBill, reportRef, onEdit }) {
   const [horizon, setHorizon] = useState(25);
   const m = model.metrics;
 
   const baseInputs = {
     capacityKw, irradiation, performanceRatio: DEFAULTS.performanceRatio, shading: f.shading, ratePerWatt,
-    annualUnits, effectiveTariff, daytimePct: f.daytimePct / 100, tariffEscalation: (Number(f.tariffEscalation) || 5) / 100,
+    annualUnits, effectiveTariff, daytimePct: 0.65, tariffEscalation: (Number(f.tariffEscalation) || 5) / 100,
     financingPct: (Number(f.financingPct) || 80) / 100, interestRate: Number(f.interestRate) || 11, tenureYears: Number(f.tenureYears) || 7,
   };
-
   const sensitivity = useMemo(() => runSensitivity(baseInputs), [capacityKw, ratePerWatt, effectiveTariff]);
   const tornado = useMemo(() => runTornado(baseInputs), [capacityKw, ratePerWatt, effectiveTariff]);
 
   const suitability = calculateSuitabilityScore({
-    monthlyBill, effectiveTariff, daytimePct: f.daytimePct / 100, irradiation,
+    monthlyBill, effectiveTariff, daytimePct: 0.65, irradiation,
     roofAreaSqft: Number(f.roofAreaSqft) || 0, recommendedKw: capacityKw,
-    operatingHours: f.operatingHours, shading: f.shading, interestRate: Number(f.interestRate) || 11,
+    operatingHours: 12, shading: f.shading, interestRate: Number(f.interestRate) || 11,
   });
-
   const eligibility = evaluateEligibility({ consumerType: "Industrial", projectType: "CAPEX", capacityKw, installationType: f.installationType });
 
-  // Scenario builder
   const scenarios = [
     { name: "No Solar", fin: null },
     { name: "Solar — No Financing", fin: 0 },
@@ -325,13 +340,20 @@ function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, 
     return { ...s, payback: mm.metrics.simplePayback, irr: mm.metrics.projectIRR, lifetime: mm.metrics.lifetimeNetBenefit, interest: mm.loan.totalInterest, monthlyOut: mm.metrics.monthlyOutflowWithSolar };
   });
 
-  // Charts data
   const genChart = model.generation.schedule.slice(0, horizon).map((r) => ({ year: `Y${r.year}`, generation: r.generation }));
-  const savingsChart = model.savings.rows.slice(0, horizon).map((r) => ({ year: `Y${r.year}`, cumulative: r.cumulative, annual: r.annualSaving }));
+  const savingsChart = model.savings.rows.slice(0, horizon).map((r) => ({ year: `Y${r.year}`, cumulative: r.cumulative }));
   const cashflowChart = model.cashflow.rows.slice(0, horizon).map((r) => ({ year: r.year, saving: r.saving, debtService: r.debtService, net: r.net }));
   const billChart = model.savings.rows.slice(0, horizon).map((r) => ({ year: `Y${r.year}`, "Without Solar": r.gridBillBefore, "With Solar": r.gridBillAfter }));
 
-  // Lead form
+  // The user's mental model breakdown (monthly, year-1)
+  const solarCovers = m.annualSavingsY1 / 12;               // value of solar per month
+  const residual = m.residualMonthlyBill;                    // still pay grid
+  const emi = m.monthlyEMI;                                  // loan EMI
+  const omMonthly = (model.cost.totalCost * DEFAULTS.omPctOfCost) / 12;
+  const totalWithSolar = residual + emi + omMonthly;
+  const netSaving = monthlyBill - totalWithSolar;
+  const emiGtSaving = netSaving > 0;
+
   const [lead, setLead] = useState({ name: "", company: "", mobile: "", email: "" });
   const [leadDone, setLeadDone] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -343,18 +365,15 @@ function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, 
       const r = await createLead({
         ...lead, city: f.city, state: f.state, discom: f.discom, industry: f.businessType,
         monthlyBill, projectSizeKw: capacityKw, loanRequirement: model.loan.loanAmount, source: "calculator",
-        result: { recommendedCapacityKw: capacityKw, projectCost: model.cost.totalCost, loanAmount: model.loan.loanAmount, emi: m.monthlyEMI, annualSavings: m.annualSavingsY1, netMonthlyBenefit: m.netMonthlyBenefit, paybackYears: m.simplePayback, projectIrr: m.projectIRR, lifetimeSavings: m.lifetimeSavings, co2AvoidedTonnes: model.environmental.lifetimeCo2Tonnes, suitabilityScore: suitability.score },
-        inputs: { state: f.state, city: f.city, businessType: f.businessType, tariff: effectiveTariff, daytimePct: f.daytimePct },
+        result: { recommendedCapacityKw: capacityKw, projectCost: model.cost.totalCost, loanAmount: model.loan.loanAmount, emi, annualSavings: m.annualSavingsY1, netMonthlyBenefit: netSaving, paybackYears: m.simplePayback, projectIrr: m.projectIRR, lifetimeSavings: m.lifetimeSavings, co2AvoidedTonnes: model.environmental.lifetimeCo2Tonnes, suitabilityScore: suitability.score },
+        inputs: { state: f.state, city: f.city, businessType: f.businessType, tariff: effectiveTariff },
       });
       setLeadDone(r); toast.success(`Assessment requested — ${r.leadId}`);
     } catch { toast.error("Submission failed"); } setBusy(false);
   };
 
-  const emiGtSaving = m.netMonthlyBenefit > 0;
-
   return (
     <div ref={reportRef}>
-      {/* Summary dashboard */}
       <Section className="py-10">
         <div className="flex flex-wrap items-center justify-between gap-4 mb-6 no-print">
           <div>
@@ -368,6 +387,55 @@ function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, 
           </div>
         </div>
 
+        {/* HERO: net monthly saving breakdown — exactly the customer's mental model */}
+        <Card className="mb-8 overflow-hidden relative hero-radial">
+          <div className="grid lg:grid-cols-5 gap-6 items-center">
+            <div className="lg:col-span-3">
+              <div className="text-xs uppercase tracking-wider text-slate-500 font-mono mb-1">Every month (Year 1)</div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-slate-300">
+                <div className="flex items-baseline gap-1.5"><span className="text-xs text-slate-500">Current bill</span><span className="num text-lg font-bold text-slate-100">{inr(monthlyBill)}</span></div>
+                <MoveRight className="w-4 h-4 text-slate-600" />
+                <div className="flex items-baseline gap-1.5"><span className="text-xs text-slate-500">Solar covers</span><span className="num text-lg font-bold text-emerald-400">− {inr(solarCovers)}</span></div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-slate-300 mt-2">
+                <div className="flex items-baseline gap-1.5"><span className="text-xs text-slate-500">You still pay grid</span><span className="num text-lg font-bold text-slate-100">{inr(residual)}</span></div>
+                <span className="text-slate-600">+</span>
+                <div className="flex items-baseline gap-1.5"><span className="text-xs text-slate-500">Loan EMI</span><span className="num text-lg font-bold text-amber-400">{inr(emi)}</span></div>
+                <span className="text-slate-600">=</span>
+                <div className="flex items-baseline gap-1.5"><span className="text-xs text-slate-500">Total outflow</span><span className="num text-lg font-bold text-slate-100">{inr(totalWithSolar)}</span></div>
+              </div>
+              <div className="mt-3 text-xs text-slate-500">O&M of {inr(omMonthly)}/mo is included in the outflow.</div>
+            </div>
+            <div className="lg:col-span-2 lg:border-l lg:border-white/10 lg:pl-8 text-center">
+              <div className="text-xs uppercase tracking-wider font-mono mb-1" style={{ color: emiGtSaving ? "#34D399" : "#F87171" }}>Net Monthly Saving</div>
+              <div className={`num text-5xl font-extrabold ${emiGtSaving ? "text-emerald-400" : "text-red-400"}`} data-testid="res-net-benefit">{inr(netSaving)}</div>
+              <div className="text-xs text-slate-500 mt-2">{emiGtSaving ? "You pocket this every month after paying EMI." : "EMI currently exceeds savings — savings grow as tariffs rise."}</div>
+            </div>
+          </div>
+        </Card>
+
+        {/* Area / coverage card */}
+        <div className="grid lg:grid-cols-2 gap-4 mb-8">
+          <Card className="!p-5">
+            <div className="flex items-center gap-2 mb-3"><Ruler className="w-5 h-5 text-amber-400" /><h3 className="font-head font-semibold text-lg text-slate-100">Area & coverage</h3></div>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-slate-400">Area to cover 100% of bill</span><span className="num text-slate-100 font-semibold">{num(areaNeed.sqft)} sq ft ({kw(fullKw)})</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Your area fits</span><span className="num text-slate-100 font-semibold">{hasAreaInput ? kw(fitKw) : "—"}</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Bill covered by solar</span><span className={`num font-semibold ${coveragePct >= 99 ? "text-emerald-400" : "text-amber-400"}`}>{coveragePct.toFixed(0)}%</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Recommended plant</span><span className="num text-amber-400 font-semibold">{kw(capacityKw)}</span></div>
+            </div>
+            {areaLimited && <p className="text-xs text-blue-400 mt-3 bg-blue-500/5 border border-blue-500/15 rounded-md px-3 py-2">Your area covers ~{coveragePct.toFixed(0)}%. To cover 100%, add ~{num(Math.max(0, areaNeed.sqft - (Number(f.roofAreaSqft) || 0)))} sq ft more — or use Open Access / Group Captive offsite.</p>}
+          </Card>
+          <Card className="!p-5">
+            <div className="flex items-center gap-2 mb-3"><HelpCircle className="w-5 h-5 text-amber-400" /><h3 className="font-head font-semibold text-lg text-slate-100">Different location? Get credits</h3></div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              <span className="text-slate-200 font-medium">Yes, it's possible.</span> With <span className="text-slate-200">Open Access</span> or <span className="text-slate-200">Group Captive</span>, you build solar at a different site, feed it to the grid, and your factory's connection is credited — effectively using that energy against your bill. <span className="text-slate-200">Net metering</span> only offsets the same connection; group/virtual net metering works within the same DISCOM. Charges (wheeling, banking, cross-subsidy) depend on your state.
+            </p>
+            <Btn as={Link} to="/project-models" variant="ghost" className="mt-3 !px-0">Compare CAPEX / OPEX / Open Access <ArrowRight className="w-3.5 h-3.5" /></Btn>
+          </Card>
+        </div>
+
+        {/* KPI grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
           <Metric label="Recommended Capacity" value={kw(capacityKw)} tone="amber" icon={Sun} testId="res-capacity" />
           <Metric label="Project Cost" value={inrCompact(model.cost.totalCost)} tone="blue" icon={Wallet} testId="res-cost" />
@@ -375,38 +443,13 @@ function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, 
           <Metric label="Monthly EMI" value={inr(m.monthlyEMI)} tone="amber" icon={IndianRupee} testId="res-emi" />
           <Metric label="Annual Savings (Yr1)" value={inrCompact(m.annualSavingsY1)} tone="emerald" icon={TrendingUp} testId="res-savings" />
           <Metric label="Simple Payback" value={m.simplePayback ? yrs(m.simplePayback) : "—"} tone="emerald" icon={Gauge} testId="res-payback" />
-          <Metric label="Current Monthly Bill" value={inr(m.currentMonthlyBill)} icon={Receipt} />
-          <Metric label="Post-Solar Bill" value={inr(m.residualMonthlyBill)} tone="blue" icon={Receipt} />
-          <Metric label="Net Monthly Benefit" value={inr(m.netMonthlyBenefit)} tone={emiGtSaving ? "emerald" : "danger"} icon={TrendingUp} testId="res-net-benefit" />
           <Metric label="Project IRR" value={m.projectIRR != null ? pct(m.projectIRR * 100) : "—"} tone="emerald" icon={BarChart3} />
           <Metric label="25-Yr Lifetime Savings" value={inrCompact(m.lifetimeSavings)} tone="emerald" icon={IndianRupee} />
           <Metric label="CO₂ Avoided (25yr)" value={`${num(model.environmental.lifetimeCo2Tonnes)} t`} tone="emerald" icon={Leaf} />
+          <Metric label="Current Bill /mo" value={inr(monthlyBill)} icon={Receipt} />
+          <Metric label="Post-Solar Bill /mo" value={inr(residual)} tone="blue" icon={Receipt} />
+          <Metric label="Potential RECs /yr" value={num(model.rec.potentialCertsPerYear)} tone="blue" icon={Zap} />
         </div>
-      </Section>
-
-      {/* Solar vs EMI */}
-      <Section className="py-6">
-        <Card>
-          <h3 className="font-head font-semibold text-xl text-slate-100 mb-1">Solar vs EMI — Monthly Cash Flow (Year 1)</h3>
-          <p className="text-sm text-slate-500 mb-6">Does your solar saving beat your loan EMI? {emiGtSaving ? <span className="text-emerald-400 font-medium">Yes — net positive from day one.</span> : <span className="text-amber-400 font-medium">Not immediately — but savings grow with tariff escalation.</span>}</p>
-          <div className="grid md:grid-cols-3 gap-4">
-            <div className="p-5 rounded-lg bg-slate-800/40 border border-slate-700">
-              <div className="text-xs uppercase tracking-wider text-slate-500 font-mono mb-2">Without Solar</div>
-              <div className="num text-2xl font-bold text-slate-100">{inr(m.currentMonthlyBill)}</div>
-              <div className="text-xs text-slate-500 mt-1">Current electricity bill / month</div>
-            </div>
-            <div className="p-5 rounded-lg bg-amber-500/5 border border-amber-500/20">
-              <div className="text-xs uppercase tracking-wider text-amber-500/80 font-mono mb-2">With Solar (outflow)</div>
-              <div className="num text-2xl font-bold text-amber-400">{inr(m.monthlyOutflowWithSolar)}</div>
-              <div className="text-xs text-slate-500 mt-1">EMI {inr(m.monthlyEMI)} + residual bill {inr(m.residualMonthlyBill)}</div>
-            </div>
-            <div className={`p-5 rounded-lg ${emiGtSaving ? "bg-emerald-500/5 border-emerald-500/20" : "bg-red-500/5 border-red-500/20"} border`}>
-              <div className={`text-xs uppercase tracking-wider font-mono mb-2 ${emiGtSaving ? "text-emerald-500/80" : "text-red-400/80"}`}>Net Monthly Benefit</div>
-              <div className={`num text-2xl font-bold ${emiGtSaving ? "text-emerald-400" : "text-red-400"}`}>{inr(m.netMonthlyBenefit)}</div>
-              <div className="text-xs text-slate-500 mt-1">Bill − (EMI + residual bill + O&M)</div>
-            </div>
-          </div>
-        </Card>
       </Section>
 
       {/* Charts */}
@@ -556,12 +599,12 @@ function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, 
             {[
               ["Irradiation", `${irradiation} kWh/m²/day (${f.state})`],
               ["Performance ratio", `${DEFAULTS.performanceRatio} (incl. ${f.shading} shading)`],
+              ["Specific yield", `~${Math.round(specificYieldCalc(irradiation, f.shading))} kWh/kW/yr`],
               ["Degradation", `~${(DEFAULTS.degradationYr * 100).toFixed(1)}% / yr`],
               ["EPC cost", `₹${ratePerWatt}/W (benchmark)`],
               ["Effective tariff", `₹${effectiveTariff.toFixed(2)}/kWh`],
               ["Tariff escalation", `${f.tariffEscalation}% / yr`],
               ["Financing", `${f.financingPct}% @ ${f.interestRate}% / ${f.tenureYears} yr`],
-              ["Grid emission factor", `${DEFAULTS.gridEmissionFactor} tCO₂/MWh`],
             ].map(([k, v]) => <div key={k}><div className="text-slate-600 font-mono uppercase tracking-wider text-[10px]">{k}</div><div className="text-slate-300 mt-0.5">{v}</div></div>)}
           </div>
           <SourceTag className="mt-4 pt-4 border-t border-white/10" source="SERC tariff orders / NIWE irradiation / CEA emission factor / CERC REC price" verified="2026-06" />
@@ -575,4 +618,9 @@ function Results({ f, model, capacityKw, irradiation, ratePerWatt, annualUnits, 
       </Section>
     </div>
   );
+}
+
+function specificYieldCalc(irradiation, shading) {
+  const loss = SHADE_LOSS[shading] ?? 0.03;
+  return irradiation * 365 * DEFAULTS.performanceRatio * (1 - loss) * DEFAULTS.availability;
 }
