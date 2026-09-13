@@ -1,0 +1,133 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0B132B;
+  --surface: #0D1B2A;
+  --card: #1B263B;
+  --card-hover: #223352;
+  --amber: #F59E0B;
+  --emerald: #10B981;
+  --blue: #3B82F6;
+  --violet: #8B5CF6;
+  --danger: #EF4444;
+  --text: #F8FAFC;
+  --text-2: #94A3B8;
+  --text-3: #64748B;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, .font-head {
+  font-family: 'Outfit', sans-serif;
+}
+
+.font-mono, code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* shadcn tokens mapped to dark fintech palette */
+@layer base {
+  :root {
+    --background: 217 54% 11%;
+    --foreground: 210 40% 98%;
+    --card: 214 34% 17%;
+    --card-foreground: 210 40% 98%;
+    --popover: 216 41% 13%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 38 92% 50%;
+    --primary-foreground: 222 47% 6%;
+    --secondary: 215 28% 24%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 215 28% 20%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 215 28% 24%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 215 25% 27%;
+    --input: 215 25% 27%;
+    --ring: 38 92% 50%;
+    --radius: 0.65rem;
+    --chart-1: 38 92% 50%;
+    --chart-2: 160 84% 39%;
+    --chart-3: 217 91% 60%;
+    --chart-4: 258 90% 66%;
+    --chart-5: 330 81% 60%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground; }
+}
+
+::selection { background: rgba(245, 158, 11, 0.3); color: #fff; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0B132B; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* Utility classes */
+.glass {
+  background: rgba(27, 38, 59, 0.72);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.card-surface {
+  background: rgba(27, 38, 59, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.9rem;
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.amber-glow { box-shadow: 0 0 40px rgba(245, 158, 11, 0.18); }
+.text-amber { color: var(--amber); }
+.text-emerald { color: var(--emerald); }
+.text-blue { color: var(--blue); }
+
+.hero-radial {
+  background:
+    radial-gradient(900px 500px at 82% -8%, rgba(245,158,11,0.16), transparent 60%),
+    radial-gradient(700px 500px at 5% 10%, rgba(59,130,246,0.12), transparent 55%);
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; }
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+.live-dot { animation: pulseGlow 1.8s ease-in-out infinite; }
+
+.num { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+
+.nav-scroll::-webkit-scrollbar { height: 0; }
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: #fff !important; color: #000 !important; }
+  .print-white { background: #fff !important; color: #000 !important; border-color: #ccc !important; }
+}
