@@ -13,7 +13,9 @@ import { evaluateEligibility } from "@/data/incentives";
 import {
   runProjectModel, runSensitivity, runTornado, calculateSuitabilityScore,
   areaForCapacity, capacityFromArea, fullBillCapacityKw,
+  calculateFinancingPackage, calculateFlatRateEMI,
 } from "@/lib/engine";
+import { getTariffTrend, buildTariffHistory, TARIFF_TREND_META, topTariffRisers } from "@/data/tariffHistory";
 import { createLead } from "@/lib/api";
 import { inr, inrCompact, kw, kwh, num, pct, yrs } from "@/lib/format";
 import {
@@ -468,6 +470,12 @@ function Results({ f, model, capacityKw, fullKw, areaNeed, coveragePct, areaLimi
         </div>
       </Section>
 
+      {/* Finance deep dive */}
+      <FinanceDeepDive projectCost={model.cost.totalCost} financingPct={(Number(f.financingPct) || 80) / 100} interestRate={Number(f.interestRate) || 11} tenureYears={Number(f.tenureYears) || 7} />
+
+      {/* Tariff history */}
+      <TariffHistory stateObj={getStateByName(f.state)} discom={f.discom} effectiveTariff={effectiveTariff} escalationPct={Number(f.tariffEscalation) || 5} />
+
       {/* Scenario builder */}
       <Section className="py-6">
         <Card>
@@ -623,4 +631,192 @@ function Results({ f, model, capacityKw, fullKw, areaNeed, coveragePct, areaLimi
 function specificYieldCalc(irradiation, shading) {
   const loss = SHADE_LOSS[shading] ?? 0.03;
   return irradiation * 365 * DEFAULTS.performanceRatio * (1 - loss) * DEFAULTS.availability;
+}
+
+// ============================ FINANCE DEEP DIVE ============================
+function FinanceDeepDive({ projectCost, financingPct, interestRate, tenureYears }) {
+  const [method, setMethod] = useState("reducing");
+  const [flatRate, setFlatRate] = useState(DEFAULTS.flatRate);
+  const [feePct, setFeePct] = useState(DEFAULTS.processingFeePct);
+  const [showSchedule, setShowSchedule] = useState(false);
+
+  const pkg = useMemo(() => calculateFinancingPackage({
+    projectCost, financingPct, interestRate, tenureYears,
+    processingFeePct: feePct, gstOnFeePct: DEFAULTS.gstOnFeePct, insurancePct: DEFAULTS.insurancePct, flatRate,
+  }), [projectCost, financingPct, interestRate, tenureYears, feePct, flatRate]);
+
+  const active = method === "reducing" ? pkg.reducing : pkg.flat;
+  const emi = active.emi;
+  const totalInterest = active.totalInterest;
+  const totalRepay = active.totalRepayment;
+
+  const start = new Date();
+  const end = new Date(start.getFullYear(), start.getMonth() + pkg.payoffMonths, 1);
+  const endLabel = end.toLocaleString("en-IN", { month: "short", year: "numeric" });
+  const startLabel = start.toLocaleString("en-IN", { month: "short", year: "numeric" });
+
+  const fees = [
+    ["Project cost", projectCost],
+    ["Down payment (your equity)", pkg.downPayment],
+    ["Loan amount", pkg.loanAmount],
+    [`Processing fee (${feePct}%)`, pkg.processingFee],
+    ["GST on processing fee (18%)", pkg.gstOnFee],
+    [`Insurance (${DEFAULTS.insurancePct}%)`, pkg.insurance],
+    ["Total upfront (day 0)", pkg.upfront],
+  ];
+
+  return (
+    <Section className="py-6">
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+          <div className="flex items-center gap-2"><Wallet className="w-5 h-5 text-amber-400" /><h3 className="font-head font-semibold text-xl text-slate-100">Financing — full breakdown</h3></div>
+          <Segmented options={[{ value: "reducing", label: "Reducing rate" }, { value: "flat", label: "Flat rate" }]} value={method} onChange={setMethod} testId="finance-method" />
+        </div>
+
+        {/* Payoff banner */}
+        <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20 mb-6 flex flex-wrap items-center gap-x-8 gap-y-2">
+          <div><div className="text-[10px] uppercase tracking-wider text-amber-500/80 font-mono">You pay</div><div className="num text-2xl font-bold text-amber-400">{inr(emi)}<span className="text-sm text-slate-500 font-normal">/month</span></div></div>
+          <div className="text-slate-500 text-sm">for <span className="num text-slate-200 font-semibold">{pkg.payoffMonths} months</span> — from <span className="text-slate-200">{startLabel}</span> until <span className="text-slate-200 font-semibold">{endLabel}</span></div>
+          {method === "flat" && <Pill tone="danger">Effective rate ≈ {pct(pkg.flat.effectiveRate)} reducing</Pill>}
+        </div>
+
+        <div className="grid lg:grid-cols-2 gap-6">
+          {/* Fee breakdown */}
+          <div>
+            <h4 className="text-sm font-medium text-slate-200 mb-3">Cost & fee breakdown</h4>
+            <div className="space-y-1.5">
+              {fees.map(([k, v], i) => (
+                <div key={k} className={`flex justify-between text-sm py-1.5 ${i === fees.length - 1 ? "border-t border-white/10 pt-2.5 font-semibold" : ""}`}>
+                  <span className="text-slate-400">{k}</span><span className={`num ${i === fees.length - 1 ? "text-amber-400" : "text-slate-200"}`}>{inr(v)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-5">
+              <SliderInput label="Processing fee" value={feePct} onChange={setFeePct} min={0} max={3} step={0.25} format={(v) => `${v}%`} testId="fee-slider" />
+              {method === "flat" && <SliderInput label="Flat interest rate" value={flatRate} onChange={setFlatRate} min={5} max={13} step={0.25} format={(v) => `${v}%`} testId="flat-slider" />}
+            </div>
+          </div>
+
+          {/* Repayment metrics */}
+          <div>
+            <h4 className="text-sm font-medium text-slate-200 mb-3">Repayment ({method === "reducing" ? "reducing balance" : "flat"})</h4>
+            <div className="grid grid-cols-2 gap-3">
+              <Metric label="Monthly EMI" value={inr(emi)} tone="amber" />
+              <Metric label="Principal" value={inrCompact(pkg.loanAmount)} tone="blue" />
+              <Metric label="Total Interest" value={inrCompact(totalInterest)} tone="danger" />
+              <Metric label="Total Repayment" value={inrCompact(totalRepay)} />
+              <Metric label="Total Cost of Credit" value={inrCompact(pkg.totalCostOfCredit)} tone="danger" sub="Interest + fees + GST" />
+              <Metric label="Payoff" value={endLabel} tone="emerald" sub={`${pkg.payoffMonths} EMIs`} />
+            </div>
+          </div>
+        </div>
+
+        {/* Reducing vs flat comparison */}
+        <div className="mt-6 overflow-x-auto">
+          <h4 className="text-sm font-medium text-slate-200 mb-3">Reducing vs Flat — why the quoted rate matters</h4>
+          <table className="w-full text-sm min-w-[560px]">
+            <thead className="text-slate-500 text-xs uppercase tracking-wider font-mono border-b border-white/10">
+              <tr>{["Method", "Quoted rate", "Monthly EMI", "Total interest", "Effective rate"].map((h) => <th key={h} className="px-3 py-2.5 text-left font-medium">{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              <tr className="border-b border-white/5">
+                <td className="px-3 py-3 font-medium text-emerald-400">Reducing balance</td>
+                <td className="px-3 py-3 num text-slate-300">{interestRate}%</td>
+                <td className="px-3 py-3 num text-slate-200">{inr(pkg.reducing.emi)}</td>
+                <td className="px-3 py-3 num text-amber-400">{inrCompact(pkg.reducing.totalInterest)}</td>
+                <td className="px-3 py-3 num text-slate-300">{interestRate}%</td>
+              </tr>
+              <tr>
+                <td className="px-3 py-3 font-medium text-slate-300">Flat rate</td>
+                <td className="px-3 py-3 num text-slate-300">{flatRate}%</td>
+                <td className="px-3 py-3 num text-slate-200">{inr(pkg.flat.emi)}</td>
+                <td className="px-3 py-3 num text-amber-400">{inrCompact(pkg.flat.totalInterest)}</td>
+                <td className="px-3 py-3 num text-red-400">≈ {pct(pkg.flat.effectiveRate)}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="text-[11px] text-slate-500 mt-2">A flat {flatRate}% is not the same as reducing {flatRate}% — its true (reducing-balance) cost is about {pct(pkg.flat.effectiveRate)}. Always compare on effective/reducing rate.</p>
+        </div>
+
+        {/* EMI schedule */}
+        <div className="mt-6">
+          <button onClick={() => setShowSchedule(!showSchedule)} className="text-sm text-amber-400 hover:text-amber-300 font-medium" data-testid="toggle-schedule">
+            {showSchedule ? "Hide" : "Show"} year-by-year EMI schedule →
+          </button>
+          {showSchedule && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-sm min-w-[620px]">
+                <thead className="text-slate-500 text-xs uppercase tracking-wider font-mono border-b border-white/10">
+                  <tr>{["Year", "Annual EMI", "Principal paid", "Interest paid", "Balance left"].map((h) => <th key={h} className="px-3 py-2.5 text-left font-medium">{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {pkg.amort.yearly.map((y) => (
+                    <tr key={y.year} className="border-b border-white/5 hover:bg-white/[0.02]">
+                      <td className="px-3 py-2.5 text-slate-300">Year {y.year}</td>
+                      <td className="px-3 py-2.5 num text-slate-200">{inr(y.debtService)}</td>
+                      <td className="px-3 py-2.5 num text-emerald-400">{inr(y.principal)}</td>
+                      <td className="px-3 py-2.5 num text-amber-400">{inr(y.interest)}</td>
+                      <td className="px-3 py-2.5 num text-slate-300">{inr(y.closingBalance)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-[11px] text-slate-500 mt-2">Reducing-balance schedule. Early years are interest-heavy; principal repayment accelerates over time. Loan closes in {endLabel}.</p>
+            </div>
+          )}
+        </div>
+        <Disclaimer className="mt-6">Fees, GST and rates are indicative and configurable by EFL. Final terms are set at credit assessment. Tax treatment of GST/interest should be confirmed with a professional.</Disclaimer>
+      </Card>
+    </Section>
+  );
+}
+
+// ============================ TARIFF HISTORY ============================
+function TariffHistory({ stateObj, discom, effectiveTariff, escalationPct }) {
+  const trend = getTariffTrend(stateObj?.code);
+  const history = buildTariffHistory(effectiveTariff, trend.c10, 10);
+  const risers = topTariffRisers(STATES, 6);
+  const firstYr = history[0];
+  const lastYr = history[history.length - 1];
+
+  return (
+    <Section className="py-6">
+      <Card>
+        <div className="flex items-center gap-2 mb-1"><TrendingUp className="w-5 h-5 text-amber-400" /><h3 className="font-head font-semibold text-xl text-slate-100">Electricity tariff trend — why solar gets better every year</h3></div>
+        <p className="text-sm text-slate-500 mb-5">{stateObj?.name || "Your state"}{discom ? ` · ${discom}` : ""} — grid power keeps getting costlier, so your solar savings grow over time. Your rate is locked; the grid's is not.</p>
+
+        <div className="grid lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2">
+            <LineChartCard data={history} xKey="year" fmt={(v) => `₹${Number(v).toFixed(1)}`} series={[{ key: "tariff", name: "Tariff ₹/kWh", color: "#F59E0B" }]} height={240} />
+            <p className="text-[11px] text-slate-500 mt-2">Indicative HT C&I tariff, back-computed from today's ₹{Number(effectiveTariff).toFixed(2)}/kWh using the state's historical CAGR.</p>
+          </div>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Metric label="10-yr tariff CAGR" value={pct(trend.c10)} tone="amber" />
+              <Metric label="5-yr tariff CAGR" value={pct(trend.c5)} tone="danger" />
+            </div>
+            <div className="p-4 rounded-lg bg-white/[0.03] border border-white/10 text-sm">
+              <div className="text-slate-400">Tariff moved from about</div>
+              <div className="num text-slate-200 font-semibold">₹{firstYr.tariff} <span className="text-slate-500">({firstYr.year})</span> → ₹{lastYr.tariff} <span className="text-slate-500">({lastYr.year})</span></div>
+              <div className="text-xs text-slate-500 mt-2">A ~{pct(((lastYr.tariff / firstYr.tariff) - 1) * 100, 0)} rise over 10 years. Assuming this continues, your solar savings escalate each year.</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6">
+          <h4 className="text-sm font-medium text-slate-200 mb-3">States with the steepest C&I tariff rise (10-yr CAGR)</h4>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            {risers.map((r) => (
+              <div key={r.code} className={`p-3 rounded-lg border ${stateObj?.code === r.code ? "bg-amber-500/10 border-amber-500/30" : "bg-slate-900/40 border-slate-800"}`}>
+                <div className="text-xs text-slate-300 truncate">{r.name}</div>
+                <div className="num text-lg font-bold text-amber-400">{pct(r.c10)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <SourceTag className="mt-5 pt-4 border-t border-white/10" source={TARIFF_TREND_META.source} verified={TARIFF_TREND_META.lastVerified} />
+        <Disclaimer className="mt-3">{TARIFF_TREND_META.note}</Disclaimer>
+      </Card>
+    </Section>
+  );
 }

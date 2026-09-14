@@ -497,3 +497,44 @@ export function runTornado(baseInputs) {
     return { label: v.label, base, low: lowM, high: highM, range: Math.abs(highM - lowM) };
   }).sort((a, b) => b.range - a.range);
 }
+
+// ---------------------------------------------------------------------------
+// 12. FLAT-RATE EMI (flat interest method) + effective (reducing) rate
+// Flat EMI = (P + P*flatRate*years) / months. Banks/NBFCs quote both — flat
+// looks cheaper but the effective reducing-balance rate is ~1.7-1.9x higher.
+// ---------------------------------------------------------------------------
+export function calculateFlatRateEMI({ principal, flatRate = 8.5, tenureYears = 7 }) {
+  const n = Math.round(tenureYears * 12);
+  if (principal <= 0 || n <= 0) return { emi: 0, totalInterest: 0, totalRepayment: 0, n: 0, effectiveRate: 0 };
+  const totalInterest = principal * (flatRate / 100) * tenureYears;
+  const totalRepayment = principal + totalInterest;
+  const emi = totalRepayment / n;
+  // Effective reducing rate: monthly IRR of borrower cashflow [+P, -emi x n]
+  const flows = [principal, ...Array(n).fill(-emi)];
+  const mIrr = calculateIRR(flows);
+  const effectiveRate = (mIrr != null ? mIrr : flatRate / 100 / 12) * 12 * 100;
+  return { emi, totalInterest, totalRepayment, n, effectiveRate };
+}
+
+// ---------------------------------------------------------------------------
+// 13. FULL FINANCING PACKAGE — loan, down payment, fees, GST, EMI, schedule
+// ---------------------------------------------------------------------------
+export function calculateFinancingPackage({
+  projectCost, financingPct = 0.8, interestRate = 11, tenureYears = 7,
+  processingFeePct = 1, gstOnFeePct = 18, insurancePct = 0.35, flatRate = 8.5,
+}) {
+  const loanAmount = projectCost * financingPct;
+  const downPayment = projectCost - loanAmount;
+  const processingFee = loanAmount * (processingFeePct / 100);
+  const gstOnFee = processingFee * (gstOnFeePct / 100);
+  const insurance = projectCost * (insurancePct / 100);
+  const upfront = downPayment + processingFee + gstOnFee + insurance;
+  const reducing = calculateLoanEMI({ principal: loanAmount, annualRate: interestRate, tenureYears });
+  const amort = calculateAmortization({ principal: loanAmount, annualRate: interestRate, tenureYears });
+  const flat = calculateFlatRateEMI({ principal: loanAmount, flatRate, tenureYears });
+  return {
+    loanAmount, downPayment, processingFee, gstOnFee, insurance, upfront,
+    reducing, amort, flat, payoffMonths: reducing.n,
+    totalCostOfCredit: reducing.totalInterest + processingFee + gstOnFee + insurance,
+  };
+}

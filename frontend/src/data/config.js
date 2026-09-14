@@ -31,6 +31,9 @@ export const DEFAULTS = {
   tenureYears: 7,
   financingPct: 0.8,
   processingFeePct: 1.0,
+  gstOnFeePct: 18,
+  insurancePct: 0.35,
+  flatRate: 8.5,
   discountRate: 0.10,
   omPctOfCost: 0.01,
 
