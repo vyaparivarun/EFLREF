@@ -34,6 +34,8 @@ export const DEFAULTS = {
   gstOnFeePct: 18,
   insurancePct: 0.35,
   flatRate: 8.5,
+  leaseRate: 9.5,
+  gstOnRentalPct: 18,
   discountRate: 0.10,
   omPctOfCost: 0.01,
 

@@ -13,7 +13,7 @@ import { evaluateEligibility } from "@/data/incentives";
 import {
   runProjectModel, runSensitivity, runTornado, calculateSuitabilityScore,
   areaForCapacity, capacityFromArea, fullBillCapacityKw,
-  calculateFinancingPackage, calculateFlatRateEMI,
+  calculateFinancingPackage, calculateFlatRateEMI, calculateLease,
 } from "@/lib/engine";
 import { getTariffTrend, buildTariffHistory, TARIFF_TREND_META, topTariffRisers } from "@/data/tariffHistory";
 import { createLead } from "@/lib/api";
@@ -471,7 +471,7 @@ function Results({ f, model, capacityKw, fullKw, areaNeed, coveragePct, areaLimi
       </Section>
 
       {/* Finance deep dive */}
-      <FinanceDeepDive projectCost={model.cost.totalCost} financingPct={(Number(f.financingPct) || 80) / 100} interestRate={Number(f.interestRate) || 11} tenureYears={Number(f.tenureYears) || 7} />
+      <FinanceDeepDive projectCost={model.cost.totalCost} financingPct={(Number(f.financingPct) || 80) / 100} interestRate={Number(f.interestRate) || 11} tenureYears={Number(f.tenureYears) || 7} annualGeneration={model.generation.year1Generation} />
 
       {/* Tariff history */}
       <TariffHistory stateObj={getStateByName(f.state)} discom={f.discom} effectiveTariff={effectiveTariff} escalationPct={Number(f.tariffEscalation) || 5} />
@@ -634,35 +634,49 @@ function specificYieldCalc(irradiation, shading) {
 }
 
 // ============================ FINANCE DEEP DIVE ============================
-function FinanceDeepDive({ projectCost, financingPct, interestRate, tenureYears }) {
-  const [method, setMethod] = useState("reducing");
+function FinanceDeepDive({ projectCost, financingPct, interestRate, tenureYears, annualGeneration }) {
+  const [structure, setStructure] = useState("loan"); // loan | lease
+  const [method, setMethod] = useState("reducing");    // reducing | flat (loan only)
   const [flatRate, setFlatRate] = useState(DEFAULTS.flatRate);
   const [feePct, setFeePct] = useState(DEFAULTS.processingFeePct);
+  const [leaseRate, setLeaseRate] = useState(DEFAULTS.leaseRate);
   const [showSchedule, setShowSchedule] = useState(false);
+  const [showAllMonths, setShowAllMonths] = useState(false);
 
   const pkg = useMemo(() => calculateFinancingPackage({
     projectCost, financingPct, interestRate, tenureYears,
     processingFeePct: feePct, gstOnFeePct: DEFAULTS.gstOnFeePct, insurancePct: DEFAULTS.insurancePct, flatRate,
   }), [projectCost, financingPct, interestRate, tenureYears, feePct, flatRate]);
 
-  const active = method === "reducing" ? pkg.reducing : pkg.flat;
-  const emi = active.emi;
-  const totalInterest = active.totalInterest;
-  const totalRepay = active.totalRepayment;
+  const lease = useMemo(() => calculateLease({
+    financeAmount: pkg.loanAmount, leaseRate, tenureYears, gstPct: DEFAULTS.gstOnRentalPct, annualGeneration,
+  }), [pkg.loanAmount, leaseRate, tenureYears, annualGeneration]);
 
+  const active = method === "reducing" ? pkg.reducing : pkg.flat;
   const start = new Date();
   const end = new Date(start.getFullYear(), start.getMonth() + pkg.payoffMonths, 1);
   const endLabel = end.toLocaleString("en-IN", { month: "short", year: "numeric" });
   const startLabel = start.toLocaleString("en-IN", { month: "short", year: "numeric" });
+  const isLoan = structure === "loan";
 
   const fees = [
-    ["Project cost", projectCost],
-    ["Down payment (your equity)", pkg.downPayment],
-    ["Loan amount", pkg.loanAmount],
+    ["Project cost (incl. GST)", projectCost],
+    [`Down payment (${Math.round((1 - financingPct) * 100)}% margin)`, pkg.downPayment],
+    [isLoan ? "Loan amount" : "Lease finance amount", pkg.loanAmount],
     [`Processing fee (${feePct}%)`, pkg.processingFee],
     ["GST on processing fee (18%)", pkg.gstOnFee],
     [`Insurance (${DEFAULTS.insurancePct}%)`, pkg.insurance],
     ["Total upfront (day 0)", pkg.upfront],
+  ];
+
+  const compRows = [
+    ["Ownership", "You own from day 1", `EFL owns during term → transfers to you after ${lease.months} months`],
+    ["Monthly payment", "EMI (principal + interest)", "Rental + 18% GST"],
+    ["Balance sheet", "On balance sheet (asset + loan)", "Off balance sheet (operating lease)"],
+    ["Depreciation", "You claim (40% accelerated)", "EFL claims (not you)"],
+    ["GST", "Upfront input credit on project", "GST charged on each rental"],
+    ["Income-tax benefit", "Interest + depreciation deductible", "100% of rental deductible"],
+    ["Pre-closure", "Charges may apply", "No pre-closure charges"],
   ];
 
   return (
@@ -670,15 +684,35 @@ function FinanceDeepDive({ projectCost, financingPct, interestRate, tenureYears 
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
           <div className="flex items-center gap-2"><Wallet className="w-5 h-5 text-amber-400" /><h3 className="font-head font-semibold text-xl text-slate-100">Financing — full breakdown</h3></div>
-          <Segmented options={[{ value: "reducing", label: "Reducing rate" }, { value: "flat", label: "Flat rate" }]} value={method} onChange={setMethod} testId="finance-method" />
+          <Segmented options={[{ value: "loan", label: "Term Loan" }, { value: "lease", label: "Leasing" }]} value={structure} onChange={setStructure} testId="finance-structure" />
         </div>
 
-        {/* Payoff banner */}
-        <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20 mb-6 flex flex-wrap items-center gap-x-8 gap-y-2">
-          <div><div className="text-[10px] uppercase tracking-wider text-amber-500/80 font-mono">You pay</div><div className="num text-2xl font-bold text-amber-400">{inr(emi)}<span className="text-sm text-slate-500 font-normal">/month</span></div></div>
-          <div className="text-slate-500 text-sm">for <span className="num text-slate-200 font-semibold">{pkg.payoffMonths} months</span> — from <span className="text-slate-200">{startLabel}</span> until <span className="text-slate-200 font-semibold">{endLabel}</span></div>
-          {method === "flat" && <Pill tone="danger">Effective rate ≈ {pct(pkg.flat.effectiveRate)} reducing</Pill>}
+        {/* Structure explainer */}
+        <div className="p-3.5 rounded-lg bg-white/[0.03] border border-white/10 mb-6 text-sm text-slate-400 leading-relaxed">
+          {isLoan
+            ? <><span className="text-slate-200 font-semibold">Term Loan:</span> you own the plant from day one, repay a monthly EMI on reducing balance, claim depreciation and upfront GST input credit. Pre-closure charges may apply.</>
+            : <><span className="text-slate-200 font-semibold">Operating Lease:</span> EFL owns the plant and you pay a monthly rental (+GST); the full rental is tax-deductible and it stays off your balance sheet. Ownership transfers to you after {lease.months} months of timely rentals. No pre-closure charges.</>}
         </div>
+
+        {isLoan ? (
+          <>
+            <div className="flex justify-end mb-4">
+              <Segmented options={[{ value: "reducing", label: "Reducing rate" }, { value: "flat", label: "Flat rate" }]} value={method} onChange={setMethod} testId="finance-method" />
+            </div>
+            {/* Payoff banner */}
+            <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20 mb-6 flex flex-wrap items-center gap-x-8 gap-y-2">
+              <div><div className="text-[10px] uppercase tracking-wider text-amber-500/80 font-mono">You pay</div><div className="num text-2xl font-bold text-amber-400" data-testid="emi-amount">{inr(active.emi)}<span className="text-sm text-slate-500 font-normal">/month</span></div></div>
+              <div className="text-slate-500 text-sm">for <span className="num text-slate-200 font-semibold">{pkg.payoffMonths} EMIs</span> — from <span className="text-slate-200">{startLabel}</span> until <span className="text-slate-200 font-semibold">{endLabel}</span></div>
+              {method === "flat" && <Pill tone="danger">Effective rate ≈ {pct(pkg.flat.effectiveRate)} reducing</Pill>}
+            </div>
+          </>
+        ) : (
+          <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20 mb-6 flex flex-wrap items-center gap-x-8 gap-y-2">
+            <div><div className="text-[10px] uppercase tracking-wider text-amber-500/80 font-mono">Monthly rental</div><div className="num text-2xl font-bold text-amber-400" data-testid="rental-amount">{inr(lease.rentalInclGst)}<span className="text-sm text-slate-500 font-normal">/month</span></div><div className="text-[11px] text-slate-500">{inr(lease.rentalExGst)} + {inr(lease.gst)} GST</div></div>
+            <div className="text-slate-500 text-sm">for <span className="num text-slate-200 font-semibold">{lease.months} rentals</span> — until <span className="text-slate-200 font-semibold">{endLabel}</span>{lease.rentalPerUnit ? <> · <span className="num text-slate-200">₹{lease.rentalPerUnit.toFixed(2)}/unit</span></> : null}</div>
+            <Pill tone="emerald">Effective ≈ {pct(leaseRate)} reducing</Pill>
+          </div>
+        )}
 
         <div className="grid lg:grid-cols-2 gap-6">
           {/* Fee breakdown */}
@@ -693,79 +727,166 @@ function FinanceDeepDive({ projectCost, financingPct, interestRate, tenureYears 
             </div>
             <div className="grid grid-cols-2 gap-3 mt-5">
               <SliderInput label="Processing fee" value={feePct} onChange={setFeePct} min={0} max={3} step={0.25} format={(v) => `${v}%`} testId="fee-slider" />
-              {method === "flat" && <SliderInput label="Flat interest rate" value={flatRate} onChange={setFlatRate} min={5} max={13} step={0.25} format={(v) => `${v}%`} testId="flat-slider" />}
+              {isLoan && method === "flat" && <SliderInput label="Flat interest rate" value={flatRate} onChange={setFlatRate} min={5} max={13} step={0.25} format={(v) => `${v}%`} testId="flat-slider" />}
+              {!isLoan && <SliderInput label="Effective lease rate" value={leaseRate} onChange={setLeaseRate} min={7} max={14} step={0.25} format={(v) => `${v}%`} testId="lease-slider" />}
             </div>
           </div>
 
           {/* Repayment metrics */}
           <div>
-            <h4 className="text-sm font-medium text-slate-200 mb-3">Repayment ({method === "reducing" ? "reducing balance" : "flat"})</h4>
+            <h4 className="text-sm font-medium text-slate-200 mb-3">{isLoan ? `Repayment (${method === "reducing" ? "reducing balance" : "flat"})` : "Lease summary"}</h4>
             <div className="grid grid-cols-2 gap-3">
-              <Metric label="Monthly EMI" value={inr(emi)} tone="amber" />
-              <Metric label="Principal" value={inrCompact(pkg.loanAmount)} tone="blue" />
-              <Metric label="Total Interest" value={inrCompact(totalInterest)} tone="danger" />
-              <Metric label="Total Repayment" value={inrCompact(totalRepay)} />
-              <Metric label="Total Cost of Credit" value={inrCompact(pkg.totalCostOfCredit)} tone="danger" sub="Interest + fees + GST" />
-              <Metric label="Payoff" value={endLabel} tone="emerald" sub={`${pkg.payoffMonths} EMIs`} />
+              {isLoan ? (
+                <>
+                  <Metric label="Monthly EMI" value={inr(active.emi)} tone="amber" />
+                  <Metric label="Principal" value={inrCompact(pkg.loanAmount)} tone="blue" />
+                  <Metric label="Total Interest" value={inrCompact(active.totalInterest)} tone="danger" />
+                  <Metric label="Total Repayment" value={inrCompact(active.totalRepayment)} />
+                  <Metric label="Total Cost of Credit" value={inrCompact(pkg.totalCostOfCredit)} tone="danger" sub="Interest + fees + GST" />
+                  <Metric label="Loan Closes" value={endLabel} tone="emerald" sub={`${pkg.payoffMonths} EMIs`} />
+                </>
+              ) : (
+                <>
+                  <Metric label="Rental (incl GST)" value={inr(lease.rentalInclGst)} tone="amber" />
+                  <Metric label="Rental (ex GST)" value={inr(lease.rentalExGst)} tone="blue" />
+                  <Metric label="GST / month (18%)" value={inr(lease.gst)} tone="danger" />
+                  <Metric label="Total Rentals (incl GST)" value={inrCompact(lease.totalRentalsInclGst)} />
+                  <Metric label="Rental per unit" value={lease.rentalPerUnit ? `₹${lease.rentalPerUnit.toFixed(2)}` : "—"} tone="emerald" sub="₹/kWh generated" />
+                  <Metric label="Ownership transfers" value={endLabel} tone="emerald" sub={`after ${lease.months} rentals`} />
+                </>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Reducing vs flat comparison */}
+        {/* Reducing vs flat comparison (loan only) */}
+        {isLoan && (
+          <div className="mt-6 overflow-x-auto">
+            <h4 className="text-sm font-medium text-slate-200 mb-3">Reducing vs Flat — why the quoted rate matters</h4>
+            <table className="w-full text-sm min-w-[560px]">
+              <thead className="text-slate-500 text-xs uppercase tracking-wider font-mono border-b border-white/10">
+                <tr>{["Method", "Quoted rate", "Monthly EMI", "Total interest", "Effective rate"].map((h) => <th key={h} className="px-3 py-2.5 text-left font-medium">{h}</th>)}</tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-white/5">
+                  <td className="px-3 py-3 font-medium text-emerald-400">Reducing balance</td>
+                  <td className="px-3 py-3 num text-slate-300">{interestRate}%</td>
+                  <td className="px-3 py-3 num text-slate-200">{inr(pkg.reducing.emi)}</td>
+                  <td className="px-3 py-3 num text-amber-400">{inrCompact(pkg.reducing.totalInterest)}</td>
+                  <td className="px-3 py-3 num text-slate-300">{interestRate}%</td>
+                </tr>
+                <tr>
+                  <td className="px-3 py-3 font-medium text-slate-300">Flat rate</td>
+                  <td className="px-3 py-3 num text-slate-300">{flatRate}%</td>
+                  <td className="px-3 py-3 num text-slate-200">{inr(pkg.flat.emi)}</td>
+                  <td className="px-3 py-3 num text-amber-400">{inrCompact(pkg.flat.totalInterest)}</td>
+                  <td className="px-3 py-3 num text-red-400">≈ {pct(pkg.flat.effectiveRate)}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="text-[11px] text-slate-500 mt-2">A flat {flatRate}% is not the same as reducing {flatRate}% — its true (reducing-balance) cost is about {pct(pkg.flat.effectiveRate)}. Always compare on effective/reducing rate.</p>
+          </div>
+        )}
+
+        {/* Term Loan vs Leasing comparison */}
         <div className="mt-6 overflow-x-auto">
-          <h4 className="text-sm font-medium text-slate-200 mb-3">Reducing vs Flat — why the quoted rate matters</h4>
-          <table className="w-full text-sm min-w-[560px]">
+          <h4 className="text-sm font-medium text-slate-200 mb-3">Term Loan vs Leasing</h4>
+          <table className="w-full text-sm min-w-[620px]">
             <thead className="text-slate-500 text-xs uppercase tracking-wider font-mono border-b border-white/10">
-              <tr>{["Method", "Quoted rate", "Monthly EMI", "Total interest", "Effective rate"].map((h) => <th key={h} className="px-3 py-2.5 text-left font-medium">{h}</th>)}</tr>
+              <tr><th className="px-3 py-2.5 text-left font-medium">Feature</th><th className={`px-3 py-2.5 text-left font-medium ${isLoan ? "text-amber-400" : ""}`}>Term Loan</th><th className={`px-3 py-2.5 text-left font-medium ${!isLoan ? "text-amber-400" : ""}`}>Operating Lease</th></tr>
             </thead>
             <tbody>
-              <tr className="border-b border-white/5">
-                <td className="px-3 py-3 font-medium text-emerald-400">Reducing balance</td>
-                <td className="px-3 py-3 num text-slate-300">{interestRate}%</td>
-                <td className="px-3 py-3 num text-slate-200">{inr(pkg.reducing.emi)}</td>
-                <td className="px-3 py-3 num text-amber-400">{inrCompact(pkg.reducing.totalInterest)}</td>
-                <td className="px-3 py-3 num text-slate-300">{interestRate}%</td>
-              </tr>
-              <tr>
-                <td className="px-3 py-3 font-medium text-slate-300">Flat rate</td>
-                <td className="px-3 py-3 num text-slate-300">{flatRate}%</td>
-                <td className="px-3 py-3 num text-slate-200">{inr(pkg.flat.emi)}</td>
-                <td className="px-3 py-3 num text-amber-400">{inrCompact(pkg.flat.totalInterest)}</td>
-                <td className="px-3 py-3 num text-red-400">≈ {pct(pkg.flat.effectiveRate)}</td>
-              </tr>
+              {compRows.map(([feat, loan, lz]) => (
+                <tr key={feat} className="border-b border-white/5">
+                  <td className="px-3 py-2.5 text-slate-400">{feat}</td>
+                  <td className={`px-3 py-2.5 ${isLoan ? "text-slate-100" : "text-slate-400"}`}>{loan}</td>
+                  <td className={`px-3 py-2.5 ${!isLoan ? "text-slate-100" : "text-slate-400"}`}>{lz}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
-          <p className="text-[11px] text-slate-500 mt-2">A flat {flatRate}% is not the same as reducing {flatRate}% — its true (reducing-balance) cost is about {pct(pkg.flat.effectiveRate)}. Always compare on effective/reducing rate.</p>
         </div>
 
-        {/* EMI schedule */}
+        {/* Full schedule (yearly + all-months) */}
         <div className="mt-6">
           <button onClick={() => setShowSchedule(!showSchedule)} className="text-sm text-amber-400 hover:text-amber-300 font-medium" data-testid="toggle-schedule">
-            {showSchedule ? "Hide" : "Show"} year-by-year EMI schedule →
+            {showSchedule ? "Hide" : "Show"} {isLoan ? "EMI" : "rental"} schedule →
           </button>
           {showSchedule && (
-            <div className="mt-4 overflow-x-auto">
-              <table className="w-full text-sm min-w-[620px]">
-                <thead className="text-slate-500 text-xs uppercase tracking-wider font-mono border-b border-white/10">
-                  <tr>{["Year", "Annual EMI", "Principal paid", "Interest paid", "Balance left"].map((h) => <th key={h} className="px-3 py-2.5 text-left font-medium">{h}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {pkg.amort.yearly.map((y) => (
-                    <tr key={y.year} className="border-b border-white/5 hover:bg-white/[0.02]">
-                      <td className="px-3 py-2.5 text-slate-300">Year {y.year}</td>
-                      <td className="px-3 py-2.5 num text-slate-200">{inr(y.debtService)}</td>
-                      <td className="px-3 py-2.5 num text-emerald-400">{inr(y.principal)}</td>
-                      <td className="px-3 py-2.5 num text-amber-400">{inr(y.interest)}</td>
-                      <td className="px-3 py-2.5 num text-slate-300">{inr(y.closingBalance)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="text-[11px] text-slate-500 mt-2">Reducing-balance schedule. Early years are interest-heavy; principal repayment accelerates over time. Loan closes in {endLabel}.</p>
+            <div className="mt-4">
+              {/* Yearly summary */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[620px]">
+                  <thead className="text-slate-500 text-xs uppercase tracking-wider font-mono border-b border-white/10">
+                    <tr>{(isLoan ? ["Year", "Annual EMI", "Principal paid", "Interest paid", "Balance left"] : ["Year", "Annual rental (incl GST)", "GST portion", "Rentals left"]).map((h) => <th key={h} className="px-3 py-2.5 text-left font-medium">{h}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {isLoan ? pkg.amort.yearly.map((y) => (
+                      <tr key={y.year} className="border-b border-white/5 hover:bg-white/[0.02]">
+                        <td className="px-3 py-2.5 text-slate-300">Year {y.year}</td>
+                        <td className="px-3 py-2.5 num text-slate-200">{inr(y.debtService)}</td>
+                        <td className="px-3 py-2.5 num text-emerald-400">{inr(y.principal)}</td>
+                        <td className="px-3 py-2.5 num text-amber-400">{inr(y.interest)}</td>
+                        <td className="px-3 py-2.5 num text-slate-300">{inr(y.closingBalance)}</td>
+                      </tr>
+                    )) : Array.from({ length: Math.ceil(lease.months / 12) }).map((_, yi) => {
+                      const monthsThisYr = Math.min(12, lease.months - yi * 12);
+                      return (
+                        <tr key={yi} className="border-b border-white/5 hover:bg-white/[0.02]">
+                          <td className="px-3 py-2.5 text-slate-300">Year {yi + 1}</td>
+                          <td className="px-3 py-2.5 num text-slate-200">{inr(lease.rentalInclGst * monthsThisYr)}</td>
+                          <td className="px-3 py-2.5 num text-amber-400">{inr(lease.gst * monthsThisYr)}</td>
+                          <td className="px-3 py-2.5 num text-slate-300">{lease.months - (yi + 1) * monthsThisYr < 0 ? 0 : lease.months - Math.min((yi + 1) * 12, lease.months)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* All months */}
+              <button onClick={() => setShowAllMonths(!showAllMonths)} className="text-sm text-amber-400 hover:text-amber-300 font-medium mt-4" data-testid="toggle-monthly">
+                {showAllMonths ? "Hide" : "Show"} every single month ({isLoan ? pkg.payoffMonths : lease.months} payments) →
+              </button>
+              {showAllMonths && (
+                <div className="mt-3 max-h-80 overflow-y-auto rounded-lg border border-white/10" data-testid="monthly-schedule">
+                  <table className="w-full text-sm min-w-[620px]">
+                    <thead className="text-slate-500 text-[10px] uppercase tracking-wider font-mono border-b border-white/10 sticky top-0 bg-[#0D1B2A]">
+                      <tr>{(isLoan ? ["#", "Month", "EMI", "Principal", "Interest", "Balance"] : ["#", "Month", "Rental (incl GST)", "GST"]).map((h) => <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {isLoan ? pkg.amort.monthly.map((mo) => {
+                        const d = new Date(start.getFullYear(), start.getMonth() + mo.month, 1);
+                        return (
+                          <tr key={mo.month} className="border-b border-white/5">
+                            <td className="px-3 py-1.5 num text-slate-500">{mo.month}</td>
+                            <td className="px-3 py-1.5 text-slate-400">{d.toLocaleString("en-IN", { month: "short", year: "2-digit" })}</td>
+                            <td className="px-3 py-1.5 num text-slate-200">{inr(mo.emi)}</td>
+                            <td className="px-3 py-1.5 num text-emerald-400">{inr(mo.principal)}</td>
+                            <td className="px-3 py-1.5 num text-amber-400">{inr(mo.interest)}</td>
+                            <td className="px-3 py-1.5 num text-slate-300">{inr(mo.balance)}</td>
+                          </tr>
+                        );
+                      }) : Array.from({ length: lease.months }).map((_, i) => {
+                        const d = new Date(start.getFullYear(), start.getMonth() + i + 1, 1);
+                        return (
+                          <tr key={i} className="border-b border-white/5">
+                            <td className="px-3 py-1.5 num text-slate-500">{i + 1}</td>
+                            <td className="px-3 py-1.5 text-slate-400">{d.toLocaleString("en-IN", { month: "short", year: "2-digit" })}</td>
+                            <td className="px-3 py-1.5 num text-slate-200">{inr(lease.rentalInclGst)}</td>
+                            <td className="px-3 py-1.5 num text-amber-400">{inr(lease.gst)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p className="text-[11px] text-slate-500 mt-2">{isLoan ? `Reducing-balance schedule — early EMIs are interest-heavy; loan closes ${endLabel}.` : `Level monthly rental (+GST) for ${lease.months} months; ownership transfers ${endLabel}.`}</p>
             </div>
           )}
         </div>
-        <Disclaimer className="mt-6">Fees, GST and rates are indicative and configurable by EFL. Final terms are set at credit assessment. Tax treatment of GST/interest should be confirmed with a professional.</Disclaimer>
+        <Disclaimer className="mt-6">Fees, GST, lease rentals and rates are indicative and configurable by EFL, and finalised at credit assessment. Depreciation, GST-input and lease-rental tax treatment should be confirmed with a qualified tax professional.</Disclaimer>
       </Card>
     </Section>
   );

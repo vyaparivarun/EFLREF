@@ -538,3 +538,18 @@ export function calculateFinancingPackage({
     totalCostOfCredit: reducing.totalInterest + processingFee + gstOnFee + insurance,
   };
 }
+
+// ---------------------------------------------------------------------------
+// 14. OPERATING LEASE (EFL model) — monthly rental + GST, ownership transfers
+// at end of tenure. Rental embeds the effective (reducing) lease rate.
+// ---------------------------------------------------------------------------
+export function calculateLease({ financeAmount, leaseRate = 9.5, tenureYears = 5, gstPct = 18, annualGeneration = 0 }) {
+  const { emi, n } = calculateLoanEMI({ principal: financeAmount, annualRate: leaseRate, tenureYears });
+  const rentalExGst = emi;
+  const gst = rentalExGst * (gstPct / 100);
+  const rentalInclGst = rentalExGst + gst;
+  const totalRentalsExGst = rentalExGst * n;
+  const totalRentalsInclGst = rentalInclGst * n;
+  const rentalPerUnit = annualGeneration > 0 ? (rentalExGst * 12) / annualGeneration : null;
+  return { rentalExGst, gst, rentalInclGst, months: n, totalRentalsExGst, totalRentalsInclGst, rentalPerUnit, gstPct, leaseRate };
+}
